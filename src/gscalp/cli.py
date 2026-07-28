@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+from dataclasses import asdict, is_dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Sequence
@@ -37,6 +38,12 @@ def _parser() -> argparse.ArgumentParser:
         choices=("sweep_atr_max", "max_stop_atr", "allow_same_bar_reclaim"),
         default="sweep_atr_max",
     )
+    grid = commands.add_parser(
+        "grid-backtest", help="run frozen grid v1.0 research"
+    )
+    grid.add_argument("--config", type=Path, default=Path("config/grid-v1.0.json"))
+    grid.add_argument("--market-root", type=Path, default=Path("artifacts/market"))
+    grid.add_argument("--output", type=Path, default=Path("artifacts/reports"))
     shadow = commands.add_parser("shadow", help="run non-trading forward logger")
     shadow.add_argument("--config", type=Path, default=Path("config/strategy.json"))
     shadow.add_argument("--summary", type=Path, default=Path("artifacts/reports/v0.1-summary.json"))
@@ -49,6 +56,7 @@ def main(
     mt5_module: Any | None = None,
     research_runner: Callable[[Path, Path, Path], dict[str, Any]] | None = None,
     recalibration_runner: Callable[[Path, Path, Path], dict[str, Any]] | None = None,
+    grid_runner: Callable[[Path, Path, Path], Any] | None = None,
 ) -> int:
     args = _parser().parse_args(argv)
     if args.command == "doctor":
@@ -145,6 +153,15 @@ def main(
                 recalibration_runner = run_same_bar_development_experiment
         report = recalibration_runner(args.config, args.market_root, args.output)
         print(json.dumps(report, indent=2, allow_nan=False))
+        return 0
+    if args.command == "grid-backtest":
+        if grid_runner is None:
+            from .grid_pipeline import run_grid_research
+
+            grid_runner = run_grid_research
+        report = grid_runner(args.config, args.market_root, args.output)
+        payload = asdict(report) if is_dataclass(report) else report
+        print(json.dumps(payload, indent=2, allow_nan=False))
         return 0
     if args.command == "shadow":
         load_config(args.config)

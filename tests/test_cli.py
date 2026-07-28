@@ -156,3 +156,40 @@ def test_recalibrate_command_delegates_to_development_only_runner(tmp_path, caps
     report = json.loads(capsys.readouterr().out)
     assert report["validation_accessed"] is False
     assert report["test_accessed"] is False
+
+
+def test_grid_backtest_command_delegates_to_partition_safe_runner(tmp_path, capsys):
+    config = tmp_path / "grid-v1.0.json"
+    config.write_text("{}", encoding="utf-8")
+    market = tmp_path / "canonical-market"
+    output = tmp_path / "grid-reports"
+    calls = []
+
+    def runner(config_path, market_root, output_dir):
+        calls.append((config_path, market_root, output_dir))
+        return {
+            "version": "grid-v1.0",
+            "status": "development_rejected",
+            "test_accessed": False,
+        }
+
+    exit_code = main(
+        [
+            "grid-backtest",
+            "--config",
+            str(config),
+            "--market-root",
+            str(market),
+            "--output",
+            str(output),
+        ],
+        grid_runner=runner,
+    )
+
+    assert exit_code == 0
+    assert calls == [(config, market, output)]
+    assert json.loads(capsys.readouterr().out) == {
+        "version": "grid-v1.0",
+        "status": "development_rejected",
+        "test_accessed": False,
+    }
