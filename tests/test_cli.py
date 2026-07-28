@@ -193,3 +193,97 @@ def test_grid_backtest_command_delegates_to_partition_safe_runner(tmp_path, caps
         "status": "development_rejected",
         "test_accessed": False,
     }
+
+
+def test_grid_news_coverage_command_reports_nonzero_when_not_ready(tmp_path, capsys):
+    config = tmp_path / "grid-v1.0.json"
+    config.write_text("{}", encoding="utf-8")
+    market = tmp_path / "canonical-market"
+    news = tmp_path / "news.csv"
+    calls = []
+
+    class Report:
+        ready = False
+
+        def to_json_dict(self):
+            return {
+                "total_sessions": 2,
+                "counts": {"missing_date_confirmation": 2},
+                "ready": False,
+                "items": [],
+            }
+
+    def runner(config_path, market_root, news_path):
+        calls.append((config_path, market_root, news_path))
+        return Report()
+
+    exit_code = main(
+        [
+            "grid-news-coverage",
+            "--config",
+            str(config),
+            "--market-root",
+            str(market),
+            "--news",
+            str(news),
+        ],
+        grid_news_coverage_runner=runner,
+    )
+
+    assert exit_code == 2
+    assert calls == [(config, market, news)]
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ready"] is False
+    assert "items" not in payload
+
+
+def test_grid_news_coverage_command_returns_zero_when_ready(tmp_path, capsys):
+    config = tmp_path / "grid-v1.0.json"
+    config.write_text("{}", encoding="utf-8")
+
+    class Report:
+        ready = True
+
+        def to_json_dict(self):
+            return {
+                "total_sessions": 2,
+                "counts": {"clear": 2},
+                "ready": True,
+                "items": [],
+            }
+
+    exit_code = main(
+        ["grid-news-coverage", "--config", str(config)],
+        grid_news_coverage_runner=lambda config_path, market_root, news_path: Report(),
+    )
+
+    assert exit_code == 0
+    assert json.loads(capsys.readouterr().out)["ready"] is True
+
+
+def test_grid_news_coverage_command_writes_full_output(tmp_path, capsys):
+    config = tmp_path / "grid-v1.0.json"
+    config.write_text("{}", encoding="utf-8")
+    output = tmp_path / "coverage.json"
+
+    class Report:
+        ready = False
+
+        def to_json_dict(self):
+            return {
+                "total_sessions": 1,
+                "counts": {"missing_date_confirmation": 1},
+                "ready": False,
+                "items": [{"local_date": "2020-01-02"}],
+            }
+
+    exit_code = main(
+        ["grid-news-coverage", "--config", str(config), "--output", str(output)],
+        grid_news_coverage_runner=lambda config_path, market_root, news_path: Report(),
+    )
+
+    assert exit_code == 2
+    assert "items" not in json.loads(capsys.readouterr().out)
+    assert json.loads(output.read_text(encoding="utf-8"))["items"] == [
+        {"local_date": "2020-01-02"}
+    ]

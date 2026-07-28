@@ -29,6 +29,17 @@ All 2,426 rejection rows record `reason=news_blocked` and
 `news_status=missing_confirmation`, with `data/news_blackouts.csv` recorded as
 the audited source path. Both development gate booleans were `false`.
 
+An explicit coverage audit was added after the initial rejection:
+
+```powershell
+python -m gscalp.cli grid-news-coverage --config config/grid-v1.0.json --market-root "D:\Source Codes\Codex\GSCALP\artifacts\market" --news data\news_blackouts.csv --output artifacts\reports\grid-v1.0-news-coverage.json
+```
+
+The current audit covers 4,772 candidate session checks across both configured
+windows from `2020-01-02` through `2026-07-15`. All 4,772 are currently
+`missing_date_confirmation`, so the news gate is not ready for another frozen
+historical run.
+
 Because no session had positive news-clear evidence, this run makes no claim
 about corrected contract-aware strategy expectancy. Historical cash P&L now
 uses the plan-implied cash value per price unit, which is 100 for production

@@ -44,6 +44,14 @@ def _parser() -> argparse.ArgumentParser:
     grid.add_argument("--config", type=Path, default=Path("config/grid-v1.0.json"))
     grid.add_argument("--market-root", type=Path, default=Path("artifacts/market"))
     grid.add_argument("--output", type=Path, default=Path("artifacts/reports"))
+    grid_news = commands.add_parser(
+        "grid-news-coverage",
+        help="verify explicit source-backed news coverage for grid sessions",
+    )
+    grid_news.add_argument("--config", type=Path, default=Path("config/grid-v1.0.json"))
+    grid_news.add_argument("--market-root", type=Path, default=Path("artifacts/market"))
+    grid_news.add_argument("--news", type=Path, default=Path("data/news_blackouts.csv"))
+    grid_news.add_argument("--output", type=Path)
     shadow = commands.add_parser("shadow", help="run non-trading forward logger")
     shadow.add_argument("--config", type=Path, default=Path("config/strategy.json"))
     shadow.add_argument("--summary", type=Path, default=Path("artifacts/reports/v0.1-summary.json"))
@@ -57,6 +65,7 @@ def main(
     research_runner: Callable[[Path, Path, Path], dict[str, Any]] | None = None,
     recalibration_runner: Callable[[Path, Path, Path], dict[str, Any]] | None = None,
     grid_runner: Callable[[Path, Path, Path], Any] | None = None,
+    grid_news_coverage_runner: Callable[[Path, Path, Path], Any] | None = None,
 ) -> int:
     args = _parser().parse_args(argv)
     if args.command == "doctor":
@@ -163,6 +172,34 @@ def main(
         payload = asdict(report) if is_dataclass(report) else report
         print(json.dumps(payload, indent=2, allow_nan=False))
         return 0
+    if args.command == "grid-news-coverage":
+        if grid_news_coverage_runner is None:
+            from .grid_config import load_grid_config
+            from .grid_news_coverage import build_news_coverage_report
+
+            def grid_news_coverage_runner(
+                config_path: Path,
+                market_root: Path,
+                news_path: Path,
+            ):
+                return build_news_coverage_report(
+                    load_grid_config(config_path), market_root, news_path
+                )
+
+        report = grid_news_coverage_runner(args.config, args.market_root, args.news)
+        payload = report.to_json_dict() if hasattr(report, "to_json_dict") else report
+        if args.output is not None:
+            args.output.parent.mkdir(parents=True, exist_ok=True)
+            args.output.write_text(
+                json.dumps(payload, indent=2, allow_nan=False), encoding="utf-8"
+            )
+        summary_payload = {
+            key: value for key, value in payload.items() if key != "items"
+        }
+        if args.output is not None:
+            summary_payload["output"] = str(args.output)
+        print(json.dumps(summary_payload, indent=2, allow_nan=False))
+        return 0 if payload.get("ready", False) else 2
     if args.command == "shadow":
         load_config(args.config)
         summary = json.loads(args.summary.read_text(encoding="utf-8"))
