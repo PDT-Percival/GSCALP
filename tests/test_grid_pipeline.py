@@ -582,6 +582,35 @@ def test_missing_news_file_blocks_with_auditable_reason(
     } == {"missing_confirmation"}
 
 
+def test_unrelated_same_date_news_row_does_not_confirm_session(
+    tmp_path, grid_config_path
+):
+    market = canonical_market_fixture(tmp_path)
+    news = tmp_path / "unrelated-news.csv"
+    news.write_text(
+        "event_start_utc,event_end_utc,currency,impact,event_name,source\n"
+        "2020-01-02T18:00:00Z,2020-01-02T18:30:00Z,USD,low,"
+        "unrelated event,test-source\n",
+        encoding="utf-8",
+    )
+    source = ParquetPartitionSource(
+        load_grid_config(grid_config_path),
+        market,
+        news_path=news,
+    )
+
+    development = source.load_development()
+
+    assert [
+        item.reason_counts for item in development.windows
+    ] == [{"news_blocked": 1}, {"news_blocked": 1}]
+    assert {
+        row.get("news_status")
+        for item in development.windows
+        for row in item.rejection_rows
+    } == {"missing_confirmation"}
+
+
 @pytest.mark.parametrize("currency", ["USD", "XAU"])
 def test_high_impact_usd_or_gold_news_overlapping_session_blocks(
     tmp_path, grid_config_path, currency
@@ -833,6 +862,8 @@ def test_production_evaluation_closes_filled_basket_on_m5_bias_abort(
     news = tmp_path / "confirmed-news.csv"
     news.write_text(
         "event_start_utc,event_end_utc,currency,impact,event_name,source\n"
+        "2020-01-02T13:00:00Z,2020-01-02T15:00:00Z,ALL,none,"
+        "NO_HIGH_IMPACT_EVENTS,test-source\n"
         "2020-01-02T18:00:00Z,2020-01-02T18:30:00Z,USD,high,CPI,"
         "test-source\n",
         encoding="utf-8",

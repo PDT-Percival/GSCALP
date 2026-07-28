@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import csv
 import hashlib
 import inspect
 import json
@@ -37,6 +36,7 @@ from .grid_models import (
     GridPlan,
     GridReason,
 )
+from .grid_news import NewsCode, news_gate
 from .grid_sizing import ProfitMarginCalculator, size_grid
 from .indicators import atr
 from .mt5_read import SymbolSpec
@@ -664,34 +664,6 @@ class ParquetPartitionSource:
         self._calculator = _ContractCalculator(self._symbol.contract_size)
         self._development_spread_ceilings: dict[str, float] = {}
         self.news_path = news_path or _DEFAULT_NEWS_BLACKOUTS_PATH
-        self._news_events = self._load_news_events()
-
-    def _load_news_events(
-        self,
-    ) -> tuple[tuple[pd.Timestamp, pd.Timestamp, Mapping[str, str]], ...]:
-        try:
-            with self.news_path.open(encoding="utf-8", newline="") as stream:
-                rows = list(csv.DictReader(stream))
-        except (OSError, csv.Error):
-            return ()
-        events = []
-        for row in rows:
-            try:
-                start = pd.Timestamp(row["event_start_utc"])
-                end = pd.Timestamp(row["event_end_utc"])
-            except (KeyError, TypeError, ValueError):
-                continue
-            if (
-                start.tzinfo is None
-                or end.tzinfo is None
-                or end <= start
-                or not row.get("source")
-            ):
-                continue
-            events.append(
-                (start.tz_convert("UTC"), end.tz_convert("UTC"), row)
-            )
-        return tuple(events)
 
     def _news_block_details(
         self,
@@ -699,28 +671,26 @@ class ParquetPartitionSource:
         session_start: pd.Timestamp,
         session_end: pd.Timestamp,
     ) -> Mapping[str, str] | None:
-        current_events = [
-            event for event in self._news_events if event[0].date() == local_date
-        ]
-        if not current_events:
+        _ = local_date
+        decision = news_gate(
+            self.news_path,
+            session_start,
+            session_end,
+            pd.Timedelta(0),
+        )
+        if decision.code is NewsCode.MISSING_DATE_CONFIRMATION:
             return {
                 "news_status": "missing_confirmation",
                 "news_event": "",
                 "news_source": str(self.news_path),
             }
-        for start, end, row in self._news_events:
-            if (
-                start < session_end
-                and end > session_start
-                and row.get("currency", "").strip().upper()
-                in {"USD", "XAU", "GOLD", "ALL"}
-                and row.get("impact", "").strip().lower() == "high"
-            ):
-                return {
-                    "news_status": "high_impact_overlap",
-                    "news_event": row.get("event_name", ""),
-                    "news_source": row.get("source", ""),
-                }
+        if decision.code is NewsCode.OVERLAPPING_BLACKOUT:
+            row = decision.matching_rows[0] if decision.matching_rows else {}
+            return {
+                "news_status": "high_impact_overlap",
+                "news_event": row.get("event_name", ""),
+                "news_source": row.get("source", ""),
+            }
         return None
 
     def load_development(self) -> PartitionEvaluation:

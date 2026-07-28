@@ -42,4 +42,7 @@ Exact next decision: reject Grid v1.0; do not create
 `config/grid-v1.0-locked.json`, and do not begin the shadow/demo plan. Before
 any new frozen historical run, populate `data/news_blackouts.csv` with
 source-backed rows explicitly confirming every candidate trading date and
-covering any high-impact USD or gold blackout intervals.
+covering any high-impact USD or gold blackout intervals. A clear session must
+be represented by a `NO_HIGH_IMPACT_EVENTS` row whose UTC interval covers the
+session being tested; an unrelated same-date event is not enough to prove that
+the session was checked and clear.
