@@ -205,3 +205,15 @@ def test_abort_bars_must_be_utc():
 
     with pytest.raises(ValueError, match="UTC"):
         simulate_grid(plan(), ticks((1, 98.8, 99.0)), non_utc, CostStress())
+
+
+def test_utc_aliases_are_accepted_for_ticks_and_abort_bars():
+    utc_alias_ticks = ticks((1, 98.8, 99.0), (59, 98.5, 98.7))
+    utc_alias_ticks.index = utc_alias_ticks.index.tz_convert("Etc/UTC")
+    utc_alias_aborts = no_abort_bars()
+    utc_alias_aborts.index = utc_alias_aborts.index.tz_convert("Etc/UTC")
+
+    result = simulate_grid(plan(), utc_alias_ticks, utc_alias_aborts, CostStress())
+
+    assert result is not None
+    assert result.reason is GridReason.SESSION_FLATTENED

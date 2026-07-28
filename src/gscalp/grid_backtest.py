@@ -17,10 +17,20 @@ from gscalp.grid_models import (
 
 
 _TARGET_TICK_SIZE = 0.01
+_UTC_ZONE_NAMES = frozenset({"UTC", "Etc/UTC", "Etc/GMT", "GMT", "UCT", "Universal", "Zulu"})
 
 
 def _is_utc(index: pd.DatetimeIndex) -> bool:
-    return str(index.tz) == "UTC"
+    timezone = index.tz
+    if timezone is None:
+        return False
+    names = {
+        str(timezone),
+        getattr(timezone, "key", None),
+        getattr(timezone, "zone", None),
+        timezone.tzname(None),
+    }
+    return bool(names & _UTC_ZONE_NAMES) and timezone.utcoffset(None) == pd.Timedelta(0)
 
 
 @dataclass(slots=True)
