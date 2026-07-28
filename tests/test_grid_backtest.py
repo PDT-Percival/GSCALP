@@ -49,31 +49,31 @@ def no_abort_bars() -> pd.DataFrame:
 def test_long_limits_fill_on_ask_and_exit_on_bid():
     result = simulate_grid(
         plan(),
-        ticks((1, 99.0, 99.2), (2, 98.8, 99.0), (3, 100.0, 100.2)),
+        ticks((1, 99.0, 99.2), (2, 98.8, 98.9), (3, 100.0, 100.2)),
         no_abort_bars(),
         CostStress(additional_cost_r=0.25),
     )
 
     assert result is not None
     assert [(leg.fill_price, leg.exit_price, leg.reason) for leg in result.legs] == [
-        (99.0, 100.0, GridReason.TARGET_CLOSED)
+        (98.9, 100.0, GridReason.TARGET_CLOSED)
     ]
-    assert result.gross_r == pytest.approx(1 / 6)
+    assert result.gross_r == pytest.approx(1.1 / 6)
     assert result.cost_r == 0.25
-    assert result.net_r == pytest.approx(-1 / 12)
+    assert result.net_r == pytest.approx(1.1 / 6 - 0.25)
 
 
 def test_short_limits_fill_on_bid_and_exit_on_ask():
     result = simulate_grid(
         plan(BiasDirection.SHORT),
-        ticks((1, 100.8, 101.0), (2, 101.0, 101.2), (3, 99.8, 100.0)),
+        ticks((1, 100.8, 101.0), (2, 101.1, 101.2), (3, 99.8, 100.0)),
         no_abort_bars(),
         CostStress(),
     )
 
     assert result is not None
     assert [(leg.fill_price, leg.exit_price, leg.reason) for leg in result.legs] == [
-        (101.0, 100.0, GridReason.TARGET_CLOSED)
+        (101.1, 100.0, GridReason.TARGET_CLOSED)
     ]
 
 
@@ -96,10 +96,10 @@ def test_same_tick_gap_fill_then_stop_is_conservative():
     )
 
     assert result is not None
-    assert [(leg.level_number, leg.exit_price, leg.reason) for leg in result.legs] == [
-        (1, 95.5, GridReason.STOPPED)
+    assert [(leg.level_number, leg.fill_price, leg.exit_price, leg.reason) for leg in result.legs] == [
+        (1, 98.9, 95.5, GridReason.STOPPED)
     ]
-    assert result.gross_r == pytest.approx(-3.5 / 6)
+    assert result.gross_r == pytest.approx(-3.4 / 6)
 
 
 def test_unfilled_levels_expire_at_minute_45():
@@ -148,3 +148,60 @@ def test_one_plan_never_creates_more_than_three_fills():
     assert result is not None
     assert [leg.level_number for leg in result.legs] == [1, 2, 3]
     assert result.maximum_levels_filled == 3
+
+
+def test_target_close_cancels_remaining_pending_levels():
+    result = simulate_grid(
+        plan(),
+        ticks((1, 98.8, 99.0), (2, 100.0, 100.2), (3, 97.8, 98.0)),
+        no_abort_bars(),
+        CostStress(),
+    )
+
+    assert result is not None
+    assert [(leg.level_number, leg.reason) for leg in result.legs] == [
+        (1, GridReason.TARGET_CLOSED)
+    ]
+
+
+def test_stop_close_cancels_remaining_pending_levels():
+    result = simulate_grid(
+        plan(),
+        ticks((1, 98.8, 99.0), (2, 96.0, 99.0), (3, 97.8, 98.0)),
+        no_abort_bars(),
+        CostStress(),
+    )
+
+    assert result is not None
+    assert [(leg.level_number, leg.reason) for leg in result.legs] == [(1, GridReason.STOPPED)]
+
+
+def test_pre_session_abort_bar_does_not_close_active_plan():
+    result = simulate_grid(
+        plan(),
+        ticks((1, 98.8, 99.0), (59, 98.5, 98.7)),
+        abort_bars(-5),
+        CostStress(),
+    )
+
+    assert result is not None
+    assert result.reason is GridReason.SESSION_FLATTENED
+    assert [(leg.level_number, leg.reason) for leg in result.legs] == [
+        (1, GridReason.SESSION_FLATTENED)
+    ]
+
+
+def test_ticks_must_be_utc():
+    non_utc = ticks((1, 98.8, 99.0))
+    non_utc.index = non_utc.index.tz_convert("Asia/Dubai")
+
+    with pytest.raises(ValueError, match="UTC"):
+        simulate_grid(plan(), non_utc, no_abort_bars(), CostStress())
+
+
+def test_abort_bars_must_be_utc():
+    non_utc = abort_bars(15)
+    non_utc.index = non_utc.index.tz_convert("Asia/Dubai")
+
+    with pytest.raises(ValueError, match="UTC"):
+        simulate_grid(plan(), ticks((1, 98.8, 99.0)), non_utc, CostStress())

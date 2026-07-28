@@ -19,6 +19,10 @@ from gscalp.grid_models import (
 _TARGET_TICK_SIZE = 0.01
 
 
+def _is_utc(index: pd.DatetimeIndex) -> bool:
+    return str(index.tz) == "UTC"
+
+
 @dataclass(slots=True)
 class OpenLeg:
     level: GridLevelPlan
@@ -43,8 +47,8 @@ class CostStress:
 
 
 def _validate_ticks(ticks: pd.DataFrame) -> pd.DataFrame:
-    if not isinstance(ticks.index, pd.DatetimeIndex) or ticks.index.tz is None:
-        raise ValueError("tick index must be timezone-aware")
+    if not isinstance(ticks.index, pd.DatetimeIndex) or not _is_utc(ticks.index):
+        raise ValueError("tick index must be timezone-aware UTC")
     if not {"bid", "ask"}.issubset(ticks.columns):
         raise ValueError("ticks must contain bid and ask columns")
     if not ticks.index.is_monotonic_increasing:
@@ -58,8 +62,8 @@ def _validate_ticks(ticks: pd.DataFrame) -> pd.DataFrame:
 
 
 def _validate_abort_bars(abort_bars: pd.DataFrame) -> pd.DataFrame:
-    if not isinstance(abort_bars.index, pd.DatetimeIndex) or abort_bars.index.tz is None:
-        raise ValueError("abort-bar index must be timezone-aware")
+    if not isinstance(abort_bars.index, pd.DatetimeIndex) or not _is_utc(abort_bars.index):
+        raise ValueError("abort-bar index must be timezone-aware UTC")
     if "abort" not in abort_bars.columns:
         raise ValueError("abort_bars must contain abort")
     if not abort_bars.index.is_monotonic_increasing:
@@ -104,6 +108,9 @@ def simulate_grid(
     active = market.loc[(market.index >= geometry.session_start) & (market.index < geometry.session_end)]
     if active.empty:
         return None
+    aborts = aborts.loc[
+        (aborts.index >= geometry.session_start) & (aborts.index < geometry.session_end)
+    ]
 
     expiry = geometry.session_start + pd.Timedelta(minutes=45)
     pending = list(plan.levels)
@@ -138,19 +145,24 @@ def simulate_grid(
                 leg.target = due_target[1]
             due_target = None
 
+        terminal_exit = False
         still_open: list[OpenLeg] = []
         executable_exit = bid if geometry.direction is BiasDirection.LONG else ask
         for leg in open_legs:
             if _should_stop(geometry.direction, executable_exit, leg.level.stop):
                 close_leg(leg, timestamp, executable_exit, GridReason.STOPPED)
+                terminal_exit = True
             elif _should_target(geometry.direction, executable_exit, leg.target):
                 close_leg(leg, timestamp, executable_exit, GridReason.TARGET_CLOSED)
+                terminal_exit = True
             else:
                 still_open.append(leg)
         open_legs = still_open
+        if terminal_exit:
+            pending.clear()
 
         filled_now: list[OpenLeg] = []
-        if timestamp < expiry:
+        if timestamp < expiry and pending:
             executable_entry = ask if geometry.direction is BiasDirection.LONG else bid
             remaining: list[GridLevelPlan] = []
             for level in pending:
@@ -161,7 +173,7 @@ def simulate_grid(
                 )
                 if fills:
                     filled_now.append(
-                        OpenLeg(level, timestamp, level.requested_price, level.provisional_target)
+                        OpenLeg(level, timestamp, executable_entry, level.provisional_target)
                     )
                 else:
                     remaining.append(level)
@@ -174,9 +186,12 @@ def simulate_grid(
             for leg in open_legs:
                 if leg in filled_now and _should_stop(geometry.direction, executable_exit, leg.level.stop):
                     close_leg(leg, timestamp, executable_exit, GridReason.STOPPED)
+                    terminal_exit = True
                 else:
                     still_open.append(leg)
             open_legs = still_open
+            if terminal_exit:
+                pending.clear()
             if open_legs:
                 target = basket_target(
                     geometry.direction,
