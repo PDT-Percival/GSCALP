@@ -10,12 +10,14 @@ import duckdb
 from gscalp.grid_config import load_grid_config
 from gscalp.grid_metrics import GridMetrics
 from gscalp.grid_pipeline import (
+    ParquetPartitionSource,
     PartitionEvaluation,
     WindowEvaluation,
+    build_bias_abort_bars,
     plan_session,
     run_grid_research,
 )
-from gscalp.grid_models import GridReason
+from gscalp.grid_models import BiasDecision, BiasDirection, GridReason
 from gscalp.mt5_read import SymbolSpec
 
 
@@ -183,6 +185,47 @@ def test_passing_validation_reads_test_once(tmp_path, grid_config_path):
     assert source.calls == ["development", "validation", "test"]
     assert summary.status == "historical_passed"
     assert summary.test_accessed
+
+
+def test_test_gate_uses_spread_only_stress_not_combined_cost_stress(
+    tmp_path, grid_config_path
+):
+    test_result = evaluation(
+        "08:45-09:45",
+        partition="test",
+        stressed_expectancy=-0.01,
+        basket_count=20,
+    )
+    test_result = replace(
+        test_result,
+        stress_metrics={
+            "spread_1.25": metrics(
+                basket_count=20,
+                expectancy_r=0.01,
+            )
+        },
+    )
+    source = SpySource(
+        [evaluation("08:45-09:45", partition="development")],
+        [
+            evaluation(
+                "08:45-09:45",
+                partition="validation",
+                basket_count=30,
+            )
+        ],
+        [test_result],
+    )
+
+    summary = run_grid_research(
+        grid_config_path,
+        tmp_path / "market",
+        tmp_path / "reports",
+        source=source,
+    )
+
+    assert summary.status == "historical_passed"
+    assert summary.test_passed
 
 
 def test_window_selection_uses_validation_stress_penalty_and_not_test_metrics(
@@ -403,12 +446,11 @@ def test_plan_session_uses_only_pre_session_inputs_and_first_session_tick(
         def margin_for_volume(self, direction, volume, entry):
             return 100.0
 
-    result = plan_session(
+    arguments = dict(
         local_date=date(2026, 7, 15),
         window="08:45-09:45",
         m5=m5,
         m15=m15,
-        ticks=ticks,
         symbol=SymbolSpec(
             "XAUUSD", 2, 0.01, 0.01, 1.0, 100.0, 0.01, 0.01, 10, 0
         ),
@@ -418,11 +460,14 @@ def test_plan_session_uses_only_pre_session_inputs_and_first_session_tick(
         free_margin=10_000.0,
         spread_ceiling=0.50,
     )
+    without_future = plan_session(ticks=ticks.iloc[:-1], **arguments)
+    result = plan_session(ticks=ticks, **arguments)
 
     assert result.reason is GridReason.GRID_ARMED
     assert result.plan is not None
     assert result.plan.geometry.anchor == 100.0
     assert result.plan.geometry.reference_spread == pytest.approx(0.20)
+    assert result == without_future
 
 
 def test_default_source_consumes_canonical_partitioned_parquet_without_mt5(
@@ -496,3 +541,204 @@ def test_default_source_consumes_canonical_partitioned_parquet_without_mt5(
     assert summary.status == "development_rejected"
     assert not summary.test_accessed
     assert len(summary.data_manifest_sha256) == 64
+
+
+def test_validation_and_test_reuse_per_window_development_spread_ceiling(
+    tmp_path, grid_config_path
+):
+    market = tmp_path / "market"
+    bars = market / "bars"
+    ticks = market / "ticks"
+    bars.mkdir(parents=True)
+    (ticks / "year=2020").mkdir(parents=True)
+    (ticks / "year=2023").mkdir(parents=True)
+    (market / "manifest.json").write_text("{}", encoding="utf-8")
+
+    def write_parquet(frame, path):
+        connection = duckdb.connect()
+        try:
+            connection.register("fixture", frame)
+            connection.execute(
+                f"COPY fixture TO '{path.as_posix()}' (FORMAT PARQUET)"
+            )
+        finally:
+            connection.close()
+
+    bar_times = pd.DatetimeIndex(
+        ["2020-01-02 12:00:00", "2023-11-30 12:00:00"]
+    )
+    bars_frame = pd.DataFrame(
+        {
+            "Timestamp": bar_times,
+            "BidOpen": [100.0, 100.0],
+            "BidHigh": [101.0, 101.0],
+            "BidLow": [99.0, 99.0],
+            "BidClose": [100.0, 100.0],
+        }
+    )
+    write_parquet(bars_frame, bars / "M5.parquet")
+    write_parquet(bars_frame, bars / "M15.parquet")
+
+    def tick_frame(day, spread):
+        index = pd.DatetimeIndex(
+            [
+                f"{day} 13:20:00",
+                f"{day} 13:45:00",
+                f"{day} 14:00:00",
+                f"{day} 14:05:00",
+                f"{day} 14:30:00",
+                f"{day} 14:45:00",
+            ]
+        )
+        return pd.DataFrame(
+            {
+                "Timestamp": index,
+                "Bid": [100.0] * len(index),
+                "Ask": [100.0 + spread] * len(index),
+            }
+        )
+
+    write_parquet(
+        tick_frame("2020-01-02", 0.20),
+        ticks / "year=2020" / "ticks.parquet",
+    )
+    write_parquet(
+        tick_frame("2023-11-30", 0.80),
+        ticks / "year=2023" / "ticks.parquet",
+    )
+    source = ParquetPartitionSource(load_grid_config(grid_config_path), market)
+
+    development = source.load_development()
+    validation = source.load_validation(("08:45-09:45",))
+    test = source.load_test(("08:45-09:45",))
+
+    assert development.windows[0].spread_ceiling == pytest.approx(0.20)
+    assert validation.windows[0].spread_ceiling == pytest.approx(0.20)
+    assert test.windows[0].spread_ceiling == pytest.approx(0.20)
+
+
+def test_bias_abort_uses_only_adverse_completed_in_session_m5_bars():
+    session_start = pd.Timestamp("2026-07-15 12:45:00+00:00")
+    session_end = session_start + pd.Timedelta(hours=1)
+    bars = pd.DataFrame(
+        {
+            "open": [99.0, 101.0, 99.0],
+            "high": [100.0, 102.0, 100.0],
+            "low": [89.0, 100.0, 89.0],
+            "close": [90.0, 101.0, 90.0],
+        },
+        index=pd.DatetimeIndex(
+            [
+                session_start - pd.Timedelta(minutes=5),
+                session_start,
+                session_start + pd.Timedelta(minutes=5),
+            ]
+        ),
+    )
+    bias = BiasDecision(
+        BiasDirection.LONG,
+        GridReason.BIAS_LOCKED,
+        session_start,
+        ema_now=100.0,
+        ema_three_bars_ago=99.0,
+    )
+
+    aborts = build_bias_abort_bars(
+        bars,
+        bias,
+        session_start,
+        session_end,
+    )
+
+    assert list(aborts.index) == [session_start + pd.Timedelta(minutes=10)]
+    assert aborts["abort"].tolist() == [True]
+
+
+def test_production_evaluation_closes_filled_basket_on_m5_bias_abort(
+    tmp_path, grid_config_path
+):
+    market = tmp_path / "market"
+    bars = market / "bars"
+    ticks = market / "ticks" / "year=2020"
+    bars.mkdir(parents=True)
+    ticks.mkdir(parents=True)
+    (market / "manifest.json").write_text("{}", encoding="utf-8")
+
+    def write_parquet(frame, path):
+        connection = duckdb.connect()
+        try:
+            connection.register("fixture", frame)
+            connection.execute(
+                f"COPY fixture TO '{path.as_posix()}' (FORMAT PARQUET)"
+            )
+        finally:
+            connection.close()
+
+    m15_index = pd.date_range(
+        "2020-01-02 06:00", periods=31, freq="15min"
+    )
+    m15_close = pd.Series(
+        [88.0 + number * 0.4 for number in range(31)]
+    )
+    write_parquet(
+        pd.DataFrame(
+            {
+                "Timestamp": m15_index,
+                "BidOpen": m15_close - 0.1,
+                "BidHigh": m15_close + 0.3,
+                "BidLow": m15_close - 0.3,
+                "BidClose": m15_close,
+            }
+        ),
+        bars / "M15.parquet",
+    )
+
+    m5_index = pd.date_range(
+        "2020-01-02 12:00", periods=22, freq="5min"
+    )
+    m5_lows = [95.0] * 18 + [91.0, 96.0, 97.0, 89.0]
+    m5_closes = [100.0] * 21 + [90.0]
+    write_parquet(
+        pd.DataFrame(
+            {
+                "Timestamp": m5_index,
+                "BidOpen": [100.0] * 22,
+                "BidHigh": [105.0] * 21 + [100.0],
+                "BidLow": m5_lows,
+                "BidClose": m5_closes,
+            }
+        ),
+        bars / "M5.parquet",
+    )
+    tick_index = pd.DatetimeIndex(
+        [
+            "2020-01-02 13:20:00",
+            "2020-01-02 13:30:00",
+            "2020-01-02 13:40:00",
+            "2020-01-02 13:45:00",
+            "2020-01-02 13:46:00",
+            "2020-01-02 13:50:00",
+        ]
+    )
+    write_parquet(
+        pd.DataFrame(
+            {
+                "Timestamp": tick_index,
+                "Bid": [99.8, 99.8, 99.8, 99.7, 97.2, 97.0],
+                "Ask": [100.0, 100.0, 100.0, 100.0, 97.5, 97.3],
+            }
+        ),
+        ticks / "ticks.parquet",
+    )
+    source = ParquetPartitionSource(load_grid_config(grid_config_path), market)
+
+    result = source.load_development()
+
+    first_window = next(
+        item for item in result.windows if item.window == "08:45-09:45"
+    )
+    assert len(first_window.baskets) == 1
+    assert first_window.baskets[0].reason is GridReason.BIAS_ABORT
+    assert {
+        leg.reason for leg in first_window.baskets[0].legs
+    } == {GridReason.BIAS_ABORT}

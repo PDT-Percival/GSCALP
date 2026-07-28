@@ -29,7 +29,13 @@ from .grid_metrics import (
     test_gate,
     validation_gate,
 )
-from .grid_models import BasketResult, GridPlan, GridReason
+from .grid_models import (
+    BasketResult,
+    BiasDecision,
+    BiasDirection,
+    GridPlan,
+    GridReason,
+)
 from .grid_sizing import ProfitMarginCalculator, size_grid
 from .indicators import atr
 from .mt5_read import SymbolSpec
@@ -81,6 +87,7 @@ class WindowEvaluation:
     stressed: GridMetrics
     standard_error: float
     bootstrap_lower: float = 0.0
+    spread_ceiling: float | None = None
     baskets: tuple[BasketResult, ...] = ()
     stressed_baskets: tuple[BasketResult, ...] = ()
     reason_counts: Mapping[str, int] = field(default_factory=dict)
@@ -112,6 +119,44 @@ class PartitionSource(Protocol):
     ) -> PartitionEvaluation: ...
 
     def load_test(self, windows: tuple[str, ...] = ()) -> PartitionEvaluation: ...
+
+
+def build_bias_abort_bars(
+    m5: pd.DataFrame,
+    bias: BiasDecision,
+    session_start: pd.Timestamp,
+    session_end: pd.Timestamp,
+) -> pd.DataFrame:
+    """Emit abort events when a completed session M5 close crosses locked EMA."""
+    if (
+        m5.index.tz is None
+        or session_start.tzinfo is None
+        or session_end.tzinfo is None
+    ):
+        raise ValueError("bars and session bounds must be timezone-aware")
+    empty = pd.DataFrame(
+        {"abort": pd.Series(dtype=bool)},
+        index=pd.DatetimeIndex([], tz="UTC"),
+    )
+    if bias.direction is None or bias.ema_now is None:
+        return empty
+    bars = m5.copy()
+    bars.index = bars.index.tz_convert("UTC")
+    completed_at = bars.index + pd.Timedelta(minutes=5)
+    in_session = (bars.index >= session_start.tz_convert("UTC")) & (
+        completed_at < session_end.tz_convert("UTC")
+    )
+    session_bars = bars.loc[in_session]
+    session_completed_at = completed_at[in_session]
+    if bias.direction is BiasDirection.LONG:
+        adverse = session_bars["close"].astype(float) <= bias.ema_now
+    else:
+        adverse = session_bars["close"].astype(float) >= bias.ema_now
+    abort_times = session_completed_at[adverse.to_numpy()]
+    return pd.DataFrame(
+        {"abort": [True] * len(abort_times)},
+        index=pd.DatetimeIndex(abort_times),
+    )
 
 
 def plan_session(
@@ -274,6 +319,7 @@ def _metric_row(item: WindowEvaluation, passed: bool) -> dict[str, Any]:
         "gate_passed": passed,
         "standard_error": item.standard_error,
         "selection_score": item.stressed.expectancy_r - item.standard_error,
+        "spread_ceiling": item.spread_ceiling,
     }
     row.update({f"base_{key}": value for key, value in asdict(item.base).items()})
     row.update(
@@ -426,6 +472,7 @@ def _write_artifacts(
                 "base": _metrics_payload(item.base),
                 "stressed": _metrics_payload(item.stressed),
                 "standard_error": _json_safe(item.standard_error),
+                "spread_ceiling": _json_safe(item.spread_ceiling),
                 "selection_score": _json_safe(
                     item.stressed.expectancy_r - item.standard_error
                 ),
@@ -538,11 +585,19 @@ def run_grid_research(
             evaluations["test"] = (
                 () if selected_test is None else (selected_test,)
             )
+            test_stressed = (
+                None
+                if selected_test is None
+                else selected_test.stress_metrics.get(
+                    "spread_1.25", selected_test.stressed
+                )
+            )
             test_passed = bool(
                 selected_test is not None
+                and test_stressed is not None
                 and test_gate(
                     selected_test.base,
-                    selected_test.stressed,
+                    test_stressed,
                     selected_test.bootstrap_lower,
                 )
             )
@@ -597,6 +652,7 @@ class ParquetPartitionSource:
             filling_mode=0,
         )
         self._calculator = _ContractCalculator(self._symbol.contract_size)
+        self._development_spread_ceilings: dict[str, float] = {}
 
     def load_development(self) -> PartitionEvaluation:
         return self._evaluate(
@@ -691,6 +747,43 @@ class ParquetPartitionSource:
         tick_store = TickParquetStore(
             self.market_root / "ticks" / "year=*" / "ticks.parquet"
         )
+        tick_cache: dict[tuple[str, date], pd.DataFrame] = {}
+        if partition == "development":
+            for window in windows:
+                observed_spreads: list[float] = []
+                for local_date in candidate_dates:
+                    session_start, session_end = new_york_session_bounds(
+                        local_date, window
+                    )
+                    session_ticks = tick_store.slice(
+                        session_start - pd.Timedelta(minutes=30), session_end
+                    )
+                    tick_cache[(window, local_date)] = session_ticks
+                    active = session_ticks.loc[
+                        (session_ticks.index >= session_start)
+                        & (session_ticks.index < session_end)
+                    ]
+                    observed_spreads.extend(
+                        (
+                            active["ask"].astype(float)
+                            - active["bid"].astype(float)
+                        ).tolist()
+                    )
+                self._development_spread_ceilings[window] = (
+                    float(np.quantile(observed_spreads, 0.90))
+                    if observed_spreads
+                    else 0.0
+                )
+        missing_ceilings = [
+            window
+            for window in windows
+            if window not in self._development_spread_ceilings
+        ]
+        if missing_ceilings:
+            raise RuntimeError(
+                "development spread ceiling must be locked before "
+                f"{partition}: {', '.join(missing_ceilings)}"
+            )
         scenarios = {
             "base": CostStress(),
             "spread_1.25": CostStress(spread_multiplier=1.25),
@@ -702,11 +795,8 @@ class ParquetPartitionSource:
             "target_delay_one_tick": CostStress(target_update_delay_ticks=1),
         }
         results: list[WindowEvaluation] = []
-        empty_aborts = pd.DataFrame(
-            {"abort": pd.Series(dtype=bool)},
-            index=pd.DatetimeIndex([], tz="UTC"),
-        )
         for window in windows:
+            spread_ceiling = self._development_spread_ceilings[window]
             baskets_by_scenario: dict[str, list[BasketResult]] = {
                 name: [] for name in scenarios
             }
@@ -716,16 +806,23 @@ class ParquetPartitionSource:
                 session_start, session_end = new_york_session_bounds(
                     local_date, window
                 )
-                ticks = tick_store.slice(
-                    session_start - pd.Timedelta(minutes=30), session_end
-                )
-                spread_ceiling = _historical_spread_ceiling(ticks)
+                ticks = tick_cache.get((window, local_date))
+                if ticks is None:
+                    ticks = tick_store.slice(
+                        session_start - pd.Timedelta(minutes=30), session_end
+                    )
+                reference_ticks = ticks.loc[ticks.index < session_start]
+                opening_ticks = ticks.loc[
+                    (ticks.index >= session_start)
+                    & (ticks.index < session_end)
+                ].head(1)
+                planning_ticks = pd.concat([reference_ticks, opening_ticks])
                 decision = plan_session(
                     local_date=local_date,
                     window=window,
                     m5=m5,
                     m15=m15,
-                    ticks=ticks,
+                    ticks=planning_ticks,
                     symbol=self._symbol,
                     config=self.config,
                     calculator=self._calculator,
@@ -743,9 +840,18 @@ class ParquetPartitionSource:
                         }
                     )
                     continue
+                locked_bias = evaluate_locked_bias(
+                    m15, session_start, self.config
+                )
+                abort_bars = build_bias_abort_bars(
+                    m5,
+                    locked_bias,
+                    session_start,
+                    session_end,
+                )
                 for scenario, costs in scenarios.items():
                     basket = simulate_grid(
-                        decision.plan, ticks, empty_aborts, costs
+                        decision.plan, ticks, abort_bars, costs
                     )
                     if basket is not None:
                         baskets_by_scenario[scenario].append(basket)
@@ -766,7 +872,10 @@ class ParquetPartitionSource:
                 name: summarize_baskets(items)
                 for name, items in baskets_by_scenario.items()
             }
-            gate_baskets = baskets_by_scenario["gate_stress"]
+            gate_scenario = (
+                "spread_1.25" if partition == "test" else "gate_stress"
+            )
+            gate_baskets = baskets_by_scenario[gate_scenario]
             net = np.asarray([item.net_r for item in gate_baskets], dtype=float)
             standard_error = (
                 float(net.std(ddof=1) / math.sqrt(len(net)))
@@ -784,8 +893,9 @@ class ParquetPartitionSource:
                     window=window,
                     partition=partition,
                     base=stress_metrics["base"],
-                    stressed=stress_metrics["gate_stress"],
+                    stressed=stress_metrics[gate_scenario],
                     standard_error=standard_error,
+                    spread_ceiling=spread_ceiling,
                     bootstrap_lower=bootstrap_lower,
                     baskets=tuple(base_baskets),
                     stressed_baskets=tuple(gate_baskets),
@@ -808,10 +918,3 @@ class _ContractCalculator:
         self, direction, volume: float, entry: float
     ) -> float:
         return volume * entry * self.contract_size / 100.0
-
-
-def _historical_spread_ceiling(ticks: pd.DataFrame) -> float:
-    if ticks.empty:
-        return 0.0
-    spreads = ticks["ask"].astype(float) - ticks["bid"].astype(float)
-    return float(spreads.quantile(0.90))
