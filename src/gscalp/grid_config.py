@@ -13,6 +13,7 @@ _TERMINAL_PATH = r"C:\Program Files\FBS MetaTrader 5\terminal64.exe"
 _SERVER = "FBS-Demo"
 _SYMBOL = "XAUUSD"
 _LEVEL_FRACTIONS = (0.25, 0.50, 0.75)
+_PARTITION_DATES = (date(2023, 11, 29), date(2025, 3, 24), date(2026, 7, 15))
 
 
 def _session_minutes(value: str) -> int:
@@ -95,8 +96,8 @@ class GridConfig:
             raise ValueError("session_minutes must be exactly 60")
         if self.max_baskets_per_session != 1:
             raise ValueError("max_baskets_per_session must be exactly one")
-        if self.development_end >= self.validation_end or self.validation_end >= self.test_end:
-            raise ValueError("partition dates must be strictly ordered")
+        if (self.development_end, self.validation_end, self.test_end) != _PARTITION_DATES:
+            raise ValueError("partition dates must exactly match the frozen grid-v1.0 boundaries")
         if self.ema_period < 2 or self.atr_period < 2:
             raise ValueError("indicator periods must be at least two")
         if self.pivot_left < 1 or self.pivot_right < 1 or self.pivot_lookback < 1:
