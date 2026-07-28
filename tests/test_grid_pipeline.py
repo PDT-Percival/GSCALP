@@ -86,6 +86,76 @@ def grid_config_path() -> Path:
     return Path(__file__).parents[1] / "config" / "grid-v1.0.json"
 
 
+def canonical_market_fixture(tmp_path: Path) -> Path:
+    market = tmp_path / "market"
+    bars = market / "bars"
+    ticks = market / "ticks" / "year=2020"
+    bars.mkdir(parents=True)
+    ticks.mkdir(parents=True)
+    (market / "manifest.json").write_text(
+        json.dumps({"dataset": "canonical-test-fixture"}), encoding="utf-8"
+    )
+
+    def write_parquet(frame, path):
+        connection = duckdb.connect()
+        try:
+            connection.register("fixture", frame)
+            connection.execute(
+                f"COPY fixture TO '{path.as_posix()}' (FORMAT PARQUET)"
+            )
+        finally:
+            connection.close()
+
+    def canonical_bars(index):
+        close = [100.0] * len(index)
+        return pd.DataFrame(
+            {
+                "Timestamp": index.tz_localize(None),
+                "BidOpen": close,
+                "BidHigh": [101.0] * len(index),
+                "BidLow": [99.0] * len(index),
+                "BidClose": close,
+            }
+        )
+
+    write_parquet(
+        canonical_bars(
+            pd.date_range(
+                "2020-01-02 00:00", periods=180, freq="5min", tz="UTC"
+            )
+        ),
+        bars / "M5.parquet",
+    )
+    write_parquet(
+        canonical_bars(
+            pd.date_range(
+                "2020-01-01 00:00", periods=80, freq="15min", tz="UTC"
+            )
+        ),
+        bars / "M15.parquet",
+    )
+    tick_index = pd.DatetimeIndex(
+        [
+            "2020-01-02 13:20:00+00:00",
+            "2020-01-02 13:30:00+00:00",
+            "2020-01-02 13:45:00+00:00",
+            "2020-01-02 14:00:00+00:00",
+            "2020-01-02 14:30:00+00:00",
+        ]
+    )
+    write_parquet(
+        pd.DataFrame(
+            {
+                "Timestamp": tick_index.tz_localize(None),
+                "Bid": [99.8] * len(tick_index),
+                "Ask": [100.0] * len(tick_index),
+            }
+        ),
+        ticks / "ticks.parquet",
+    )
+    return market
+
+
 def test_failed_development_never_reads_validation_or_test(
     tmp_path, grid_config_path
 ):
@@ -473,66 +543,7 @@ def test_plan_session_uses_only_pre_session_inputs_and_first_session_tick(
 def test_default_source_consumes_canonical_partitioned_parquet_without_mt5(
     tmp_path, grid_config_path
 ):
-    market = tmp_path / "market"
-    bars = market / "bars"
-    ticks = market / "ticks" / "year=2020"
-    bars.mkdir(parents=True)
-    ticks.mkdir(parents=True)
-    (market / "manifest.json").write_text(
-        json.dumps({"dataset": "canonical-test-fixture"}), encoding="utf-8"
-    )
-
-    def write_parquet(frame, path):
-        connection = duckdb.connect()
-        try:
-            connection.register("fixture", frame)
-            connection.execute(f"COPY fixture TO '{path.as_posix()}' (FORMAT PARQUET)")
-        finally:
-            connection.close()
-
-    def canonical_bars(index):
-        close = [100.0] * len(index)
-        return pd.DataFrame(
-            {
-                "Timestamp": index.tz_localize(None),
-                "BidOpen": close,
-                "BidHigh": [101.0] * len(index),
-                "BidLow": [99.0] * len(index),
-                "BidClose": close,
-            }
-        )
-
-    write_parquet(
-        canonical_bars(
-            pd.date_range("2020-01-02 00:00", periods=180, freq="5min", tz="UTC")
-        ),
-        bars / "M5.parquet",
-    )
-    write_parquet(
-        canonical_bars(
-            pd.date_range("2020-01-01 00:00", periods=80, freq="15min", tz="UTC")
-        ),
-        bars / "M15.parquet",
-    )
-    tick_index = pd.DatetimeIndex(
-        [
-            "2020-01-02 13:20:00+00:00",
-            "2020-01-02 13:30:00+00:00",
-            "2020-01-02 13:45:00+00:00",
-            "2020-01-02 14:00:00+00:00",
-            "2020-01-02 14:30:00+00:00",
-        ]
-    )
-    write_parquet(
-        pd.DataFrame(
-            {
-                "Timestamp": tick_index.tz_localize(None),
-                "Bid": [99.8] * len(tick_index),
-                "Ask": [100.0] * len(tick_index),
-            }
-        ),
-        ticks / "ticks.parquet",
-    )
+    market = canonical_market_fixture(tmp_path)
 
     summary = run_grid_research(
         grid_config_path, market, tmp_path / "reports"
@@ -541,6 +552,64 @@ def test_default_source_consumes_canonical_partitioned_parquet_without_mt5(
     assert summary.status == "development_rejected"
     assert not summary.test_accessed
     assert len(summary.data_manifest_sha256) == 64
+    payload = json.loads(
+        (tmp_path / "reports" / "grid-v1.0-summary.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert payload["reason_counts"] == {"news_blocked": 2}
+
+
+def test_missing_news_file_blocks_with_auditable_reason(
+    tmp_path, grid_config_path
+):
+    market = canonical_market_fixture(tmp_path)
+    source = ParquetPartitionSource(
+        load_grid_config(grid_config_path),
+        market,
+        news_path=tmp_path / "missing-news.csv",
+    )
+
+    development = source.load_development()
+
+    assert [
+        item.reason_counts for item in development.windows
+    ] == [{"news_blocked": 1}, {"news_blocked": 1}]
+    assert {
+        row.get("news_status")
+        for item in development.windows
+        for row in item.rejection_rows
+    } == {"missing_confirmation"}
+
+
+@pytest.mark.parametrize("currency", ["USD", "XAU"])
+def test_high_impact_usd_or_gold_news_overlapping_session_blocks(
+    tmp_path, grid_config_path, currency
+):
+    market = canonical_market_fixture(tmp_path)
+    news = tmp_path / "confirmed-news.csv"
+    news.write_text(
+        "event_start_utc,event_end_utc,currency,impact,event_name,source\n"
+        f"2020-01-02T13:30:00Z,2020-01-02T15:30:00Z,{currency},high,"
+        "market-moving event,test-source\n",
+        encoding="utf-8",
+    )
+    source = ParquetPartitionSource(
+        load_grid_config(grid_config_path),
+        market,
+        news_path=news,
+    )
+
+    development = source.load_development()
+
+    assert [
+        item.reason_counts for item in development.windows
+    ] == [{"news_blocked": 1}, {"news_blocked": 1}]
+    assert {
+        (row.get("news_status"), row.get("news_event"), row.get("news_source"))
+        for item in development.windows
+        for row in item.rejection_rows
+    } == {("high_impact_overlap", "market-moving event", "test-source")}
 
 
 def test_validation_and_test_reuse_per_window_development_spread_ceiling(
@@ -730,7 +799,18 @@ def test_production_evaluation_closes_filled_basket_on_m5_bias_abort(
         ),
         ticks / "ticks.parquet",
     )
-    source = ParquetPartitionSource(load_grid_config(grid_config_path), market)
+    news = tmp_path / "confirmed-news.csv"
+    news.write_text(
+        "event_start_utc,event_end_utc,currency,impact,event_name,source\n"
+        "2020-01-02T18:00:00Z,2020-01-02T18:30:00Z,USD,high,CPI,"
+        "test-source\n",
+        encoding="utf-8",
+    )
+    source = ParquetPartitionSource(
+        load_grid_config(grid_config_path),
+        market,
+        news_path=news,
+    )
 
     result = source.load_development()
 

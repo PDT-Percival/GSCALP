@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import csv
 import hashlib
 import inspect
 import json
@@ -44,6 +45,9 @@ from .research import TickParquetStore, new_york_session_bounds
 
 _PREFIX = "grid-v1.0"
 _DEVELOPMENT_START = date(2020, 1, 2)
+_DEFAULT_NEWS_BLACKOUTS_PATH = (
+    Path(__file__).resolve().parents[2] / "data" / "news_blackouts.csv"
+)
 _COST_ASSUMPTIONS = {
     "base": "observed executable Tickstory bid/ask",
     "spread_multipliers": [1.0, 1.25, 1.5],
@@ -632,7 +636,13 @@ class ParquetPartitionSource:
     methods so validation and test files cannot be touched before their gates.
     """
 
-    def __init__(self, config: GridConfig, market_root: Path) -> None:
+    def __init__(
+        self,
+        config: GridConfig,
+        market_root: Path,
+        *,
+        news_path: Path | None = None,
+    ) -> None:
         self.config = config
         self.market_root = market_root
         manifest = market_root / "manifest.json"
@@ -653,6 +663,65 @@ class ParquetPartitionSource:
         )
         self._calculator = _ContractCalculator(self._symbol.contract_size)
         self._development_spread_ceilings: dict[str, float] = {}
+        self.news_path = news_path or _DEFAULT_NEWS_BLACKOUTS_PATH
+        self._news_events = self._load_news_events()
+
+    def _load_news_events(
+        self,
+    ) -> tuple[tuple[pd.Timestamp, pd.Timestamp, Mapping[str, str]], ...]:
+        try:
+            with self.news_path.open(encoding="utf-8", newline="") as stream:
+                rows = list(csv.DictReader(stream))
+        except (OSError, csv.Error):
+            return ()
+        events = []
+        for row in rows:
+            try:
+                start = pd.Timestamp(row["event_start_utc"])
+                end = pd.Timestamp(row["event_end_utc"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            if (
+                start.tzinfo is None
+                or end.tzinfo is None
+                or end <= start
+                or not row.get("source")
+            ):
+                continue
+            events.append(
+                (start.tz_convert("UTC"), end.tz_convert("UTC"), row)
+            )
+        return tuple(events)
+
+    def _news_block_details(
+        self,
+        local_date: date,
+        session_start: pd.Timestamp,
+        session_end: pd.Timestamp,
+    ) -> Mapping[str, str] | None:
+        current_events = [
+            event for event in self._news_events if event[0].date() == local_date
+        ]
+        if not current_events:
+            return {
+                "news_status": "missing_confirmation",
+                "news_event": "",
+                "news_source": str(self.news_path),
+            }
+        for start, end, row in current_events:
+            if (
+                start < session_end
+                and end > session_start
+                and row.get("currency", "").strip().upper()
+                in {"USD", "XAU", "GOLD", "ALL"}
+                and row.get("impact", "").strip().lower() == "high"
+            ):
+                return {
+                    "news_status": "high_impact_overlap",
+                    "news_event": row.get("event_name", ""),
+                    "news_source": row.get("source", ""),
+                }
+        return None
 
     def load_development(self) -> PartitionEvaluation:
         return self._evaluate(
@@ -806,6 +875,20 @@ class ParquetPartitionSource:
                 session_start, session_end = new_york_session_bounds(
                     local_date, window
                 )
+                news_block = self._news_block_details(
+                    local_date, session_start, session_end
+                )
+                if news_block is not None:
+                    reasons[GridReason.NEWS_BLOCKED.value] += 1
+                    rejections.append(
+                        {
+                            "local_date": local_date.isoformat(),
+                            "session_start": session_start.isoformat(),
+                            "reason": GridReason.NEWS_BLOCKED.value,
+                            **news_block,
+                        }
+                    )
+                    continue
                 ticks = tick_cache.get((window, local_date))
                 if ticks is None:
                     ticks = tick_store.slice(

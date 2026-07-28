@@ -1,3 +1,5 @@
+from dataclasses import replace
+
 import pandas as pd
 import pytest
 
@@ -61,6 +63,21 @@ def test_long_limits_fill_on_ask_and_exit_on_bid():
     assert result.gross_r == pytest.approx(1.1 / 6)
     assert result.cost_r == 0.25
     assert result.net_r == pytest.approx(1.1 / 6 - 0.25)
+
+
+def test_production_contract_scale_applies_to_cash_pnl_and_r():
+    production_plan = replace(plan(), projected_loss_cash=600.0)
+
+    result = simulate_grid(
+        production_plan,
+        ticks((1, 99.0, 99.2), (2, 98.8, 98.9), (3, 100.0, 100.2)),
+        no_abort_bars(),
+        CostStress(),
+    )
+
+    assert result is not None
+    assert result.legs[0].pnl_cash == pytest.approx(110.0)
+    assert result.gross_r == pytest.approx(1.1 / 6)
 
 
 def test_short_limits_fill_on_bid_and_exit_on_ask():

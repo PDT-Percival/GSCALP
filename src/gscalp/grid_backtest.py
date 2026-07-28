@@ -97,9 +97,15 @@ def _should_target(direction: BiasDirection, executable: float, target: float) -
     return executable >= target if direction is BiasDirection.LONG else executable <= target
 
 
-def _pnl_cash(direction: BiasDirection, leg: OpenLeg, exit_price: float) -> float:
+def _pnl_cash(
+    direction: BiasDirection,
+    leg: OpenLeg,
+    exit_price: float,
+    cash_per_price_unit: float,
+) -> float:
     change = exit_price - leg.fill_price
-    return change * leg.level.volume if direction is BiasDirection.LONG else -change * leg.level.volume
+    pnl = change * leg.level.volume * cash_per_price_unit
+    return pnl if direction is BiasDirection.LONG else -pnl
 
 
 def simulate_grid(
@@ -113,6 +119,13 @@ def simulate_grid(
     aborts = _validate_abort_bars(abort_bars)
     if plan.projected_loss_cash <= 0:
         raise ValueError("projected_loss_cash must be positive")
+    requested_loss_price_units = sum(
+        abs(level.requested_price - level.stop) * level.volume
+        for level in plan.levels
+    )
+    cash_per_price_unit = plan.projected_loss_cash / requested_loss_price_units
+    if not math.isfinite(cash_per_price_unit) or cash_per_price_unit <= 0:
+        raise ValueError("plan must imply a positive finite cash value per price unit")
 
     geometry = plan.geometry
     active = market.loc[(market.index >= geometry.session_start) & (market.index < geometry.session_end)]
@@ -136,7 +149,7 @@ def simulate_grid(
 
     def close_leg(leg: OpenLeg, timestamp: pd.Timestamp, price: float, reason: GridReason) -> None:
         nonlocal realized_cash, final_reason
-        pnl = _pnl_cash(geometry.direction, leg, price)
+        pnl = _pnl_cash(geometry.direction, leg, price, cash_per_price_unit)
         realized_cash += pnl
         closed_legs.append(
             LegResult(
@@ -226,7 +239,13 @@ def simulate_grid(
             final_reason = GridReason.BIAS_ABORT
 
         marked_cash = realized_cash + sum(
-            _pnl_cash(geometry.direction, leg, executable_exit) for leg in open_legs
+            _pnl_cash(
+                geometry.direction,
+                leg,
+                executable_exit,
+                cash_per_price_unit,
+            )
+            for leg in open_legs
         )
         excursion_cash.append(marked_cash)
         if final_reason is GridReason.BIAS_ABORT:
