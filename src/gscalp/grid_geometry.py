@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR
 
 import pandas as pd
 
@@ -9,16 +10,19 @@ from gscalp.grid_models import BiasDecision, BiasDirection, GeometryDecision, Gr
 from gscalp.mt5_read import SymbolSpec
 
 
+def _round_to_tick(price: float, tick_size: float, rounding: str) -> float:
+    units = Decimal(str(price)) / Decimal(str(tick_size))
+    return float(units.to_integral_value(rounding=rounding) * Decimal(str(tick_size)))
+
+
 def round_entry(price: float, direction: BiasDirection, tick_size: float) -> float:
-    units = price / tick_size
-    rounded = math.floor(units) if direction is BiasDirection.LONG else math.ceil(units)
-    return rounded * tick_size
+    rounding = ROUND_CEILING if direction is BiasDirection.LONG else ROUND_FLOOR
+    return _round_to_tick(price, tick_size, rounding)
 
 
 def round_stop(price: float, direction: BiasDirection, tick_size: float) -> float:
-    units = price / tick_size
-    rounded = math.floor(units) if direction is BiasDirection.LONG else math.ceil(units)
-    return rounded * tick_size
+    rounding = ROUND_FLOOR if direction is BiasDirection.LONG else ROUND_CEILING
+    return _round_to_tick(price, tick_size, rounding)
 
 
 def _broker_distances_are_valid(
@@ -61,6 +65,10 @@ def build_grid_geometry(
     )
     raw_stop = pivot[1] - buffer if direction is BiasDirection.LONG else pivot[1] + buffer
     stop = round_stop(raw_stop, direction, symbol.tick_size)
+    if (direction is BiasDirection.LONG and stop >= anchor) or (
+        direction is BiasDirection.SHORT and stop <= anchor
+    ):
+        return GeometryDecision(None, GridReason.INVALIDATION_TOO_CLOSE)
     distance = abs(anchor - stop)
     if distance < config.invalidation_atr_min * atr:
         return GeometryDecision(None, GridReason.INVALIDATION_TOO_CLOSE)

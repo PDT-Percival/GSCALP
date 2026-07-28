@@ -97,6 +97,68 @@ def test_short_geometry_is_symmetric_around_executable_bid(
 
 
 @pytest.mark.parametrize(
+    ("direction", "anchor_bid", "anchor_ask", "pivot_price", "expected_level"),
+    [
+        (BiasDirection.LONG, 99.75, 100.05, 91.0, 97.54),
+        (BiasDirection.SHORT, 200.05, 200.35, 209.10, 202.56),
+    ],
+)
+def test_entry_rounding_keeps_each_non_aligned_entry_farther_from_stop(
+    direction,
+    anchor_bid,
+    anchor_ask,
+    pivot_price,
+    expected_level,
+    grid_config,
+    symbol,
+    session_start,
+):
+    result = decision(
+        direction=direction,
+        anchor_bid=anchor_bid,
+        anchor_ask=anchor_ask,
+        pivot_price=pivot_price,
+        symbol=symbol,
+        grid_config=grid_config,
+        session_start=session_start,
+    )
+
+    assert result.reason is GridReason.GRID_ARMED
+    assert result.geometry.level_prices[0] == expected_level
+    assert abs(result.geometry.level_prices[0] - result.geometry.stop) > 7.5375
+
+
+@pytest.mark.parametrize(
+    ("direction", "anchor_bid", "anchor_ask", "pivot_price"),
+    [
+        (BiasDirection.LONG, 99.70, 100.00, 111.00),
+        (BiasDirection.SHORT, 200.00, 200.30, 189.00),
+    ],
+)
+def test_geometry_rejects_a_stop_on_the_wrong_side_of_the_executable_anchor(
+    direction,
+    anchor_bid,
+    anchor_ask,
+    pivot_price,
+    grid_config,
+    symbol,
+    session_start,
+):
+    result = decision(
+        direction=direction,
+        anchor_bid=anchor_bid,
+        anchor_ask=anchor_ask,
+        pivot_price=pivot_price,
+        symbol=symbol,
+        grid_config=grid_config,
+        session_start=session_start,
+    )
+
+    assert result.geometry is None
+    assert result.reason is GridReason.INVALIDATION_TOO_CLOSE
+
+
+@pytest.mark.parametrize(
     ("kwargs", "reason"),
     [
         ({"atr": None}, GridReason.ATR_UNAVAILABLE),
