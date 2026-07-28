@@ -100,7 +100,11 @@ class GridConfig:
             raise ValueError("partition dates must exactly match the frozen grid-v1.0 boundaries")
         if self.ema_period < 2 or self.atr_period < 2:
             raise ValueError("indicator periods must be at least two")
-        if (self.pivot_left, self.pivot_right) != (2, 2):
+        if (
+            type(self.pivot_left) is not int
+            or type(self.pivot_right) is not int
+            or (self.pivot_left, self.pivot_right) != (2, 2)
+        ):
             raise ValueError("pivot_left and pivot_right must both be exactly two")
         if self.pivot_lookback < 1:
             raise ValueError("pivot_lookback must be positive")

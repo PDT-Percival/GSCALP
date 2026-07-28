@@ -71,6 +71,8 @@ def test_grid_config_is_frozen_and_exactly_demo_scoped(tmp_path):
         ("level_fractions", [0.25, 0.50, 0.80]),
         ("pivot_left", 1),
         ("pivot_right", 1),
+        ("pivot_left", 2.0),
+        ("pivot_right", 2.0),
         ("pending_expiry_minute", 46),
         ("session_minutes", 59),
     ],
