@@ -8,3 +8,4 @@ tickstory/*.csv
 *.jsonl
 .openai/
 *.egg-info/
+.worktrees/
