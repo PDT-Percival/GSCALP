@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "gscalp"
 version = "0.1.0"
-description = "Reason-coded XAUUSD research and FBS-demo execution system"
+description = "Reason-coded XAUUSD directional-grid research and shadow system"
 requires-python = ">=3.11"
 dependencies = [
   "duckdb>=1.5",
