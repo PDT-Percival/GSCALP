@@ -612,6 +612,37 @@ def test_high_impact_usd_or_gold_news_overlapping_session_blocks(
     } == {("high_impact_overlap", "market-moving event", "test-source")}
 
 
+def test_blackout_starting_previous_utc_date_still_blocks_session(
+    tmp_path, grid_config_path
+):
+    market = canonical_market_fixture(tmp_path)
+    news = tmp_path / "cross-date-news.csv"
+    news.write_text(
+        "event_start_utc,event_end_utc,currency,impact,event_name,source\n"
+        "2020-01-01T23:30:00Z,2020-01-02T15:30:00Z,USD,high,"
+        "cross-date event,previous-date-source\n"
+        "2020-01-02T18:00:00Z,2020-01-02T18:30:00Z,USD,high,"
+        "same-date confirmation,current-date-source\n",
+        encoding="utf-8",
+    )
+    source = ParquetPartitionSource(
+        load_grid_config(grid_config_path),
+        market,
+        news_path=news,
+    )
+
+    development = source.load_development()
+
+    assert [
+        item.reason_counts for item in development.windows
+    ] == [{"news_blocked": 1}, {"news_blocked": 1}]
+    assert {
+        (row.get("news_event"), row.get("news_source"))
+        for item in development.windows
+        for row in item.rejection_rows
+    } == {("cross-date event", "previous-date-source")}
+
+
 def test_validation_and_test_reuse_per_window_development_spread_ceiling(
     tmp_path, grid_config_path
 ):

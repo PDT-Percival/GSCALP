@@ -708,7 +708,7 @@ class ParquetPartitionSource:
                 "news_event": "",
                 "news_source": str(self.news_path),
             }
-        for start, end, row in current_events:
+        for start, end, row in self._news_events:
             if (
                 start < session_end
                 and end > session_start
