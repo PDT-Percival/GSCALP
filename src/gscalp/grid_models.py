@@ -92,6 +92,13 @@ class GeometryDecision:
 
 
 @dataclass(frozen=True, slots=True)
+class PlanDecision:
+    plan: GridPlan | None
+    reason: GridReason
+    diagnostics: tuple[tuple[str, float | str], ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
 class GridLevelPlan:
     level_number: int
     requested_price: float
