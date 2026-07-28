@@ -98,6 +98,17 @@ def test_rejects_all_level_margin_above_ten_percent_of_free_margin(geometry, con
     assert result.reason is GridReason.MARGIN_LIMIT_EXCEEDED
 
 
+def test_rejects_a_negative_margin_response(geometry, config, symbol):
+    result = size_grid(
+        geometry=geometry, starting_day_equity=10_000.0, free_margin=10_000.0,
+        symbol=symbol, calculator=FixedCalculator(margin_per_level=-1.0),
+        config=config, basket_id="basket-1",
+    )
+
+    assert result.plan is None
+    assert result.reason is GridReason.MARGIN_LIMIT_EXCEEDED
+
+
 @pytest.mark.parametrize("losses", [(0.0, 70.0, 40.0), (None, 70.0, 40.0)])
 def test_rejects_nonpositive_or_missing_one_lot_loss(geometry, config, symbol, losses):
     result = size_grid(

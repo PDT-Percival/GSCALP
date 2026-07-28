@@ -101,9 +101,12 @@ def size_grid(
         for entry in geometry.level_prices
     )
     try:
-        total_margin = sum(float(margin) for margin in margins)
+        margin_values = tuple(float(margin) for margin in margins)
     except (TypeError, ValueError):
         return PlanDecision(None, GridReason.MARGIN_LIMIT_EXCEEDED)
+    if any(not math.isfinite(margin) or margin < 0 for margin in margin_values):
+        return PlanDecision(None, GridReason.MARGIN_LIMIT_EXCEEDED)
+    total_margin = sum(margin_values)
     if not math.isfinite(total_margin) or total_margin > free_margin * config.max_margin_fraction:
         return PlanDecision(None, GridReason.MARGIN_LIMIT_EXCEEDED)
     levels = tuple(
