@@ -1,6 +1,6 @@
 # Directional Pullback Scalper v1.1 Design
 
-**Status:** Approved concept; written specification awaiting user review  
+**Status:** Approved for implementation planning
 **Version:** v1.1 research candidate  
 **Date:** 28 July 2026  
 **Scope:** XAUUSD on the connected FBS demo environment, one declared 60-minute New York session per trading day
