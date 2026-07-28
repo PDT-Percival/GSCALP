@@ -1,0 +1,19 @@
+{
+  "terminal_path": "C:\\Program Files\\FBS MetaTrader 5\\terminal64.exe",
+  "required_server": "FBS-Demo",
+  "symbol": "XAUUSD",
+  "mode": "shadow",
+  "risk_per_trade": 0.0025,
+  "daily_loss_limit": 0.005,
+  "max_trades": 2,
+  "candidate_sessions_ny": ["08:45-09:45", "09:30-10:30"],
+  "ema_period": 20,
+  "atr_period": 14,
+  "sweep_atr_min": 0.15,
+  "sweep_atr_max": 0.5,
+  "displacement_atr_min": 0.5,
+  "max_stop_atr": 0.8,
+  "minimum_room_r": 1.2,
+  "target_r": 1.4
+}
+

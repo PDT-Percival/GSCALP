@@ -1,0 +1,10 @@
+.pytest_cache/
+__pycache__/
+*.py[cod]
+artifacts/
+tickstory/*.csv
+!tickstory/.gitkeep
+*.parquet
+*.jsonl
+.openai/
+*.egg-info/

@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gscalp"
+version = "0.1.0"
+description = "Reason-coded XAUUSD research and FBS-demo execution system"
+requires-python = ">=3.11"
+dependencies = [
+  "duckdb>=1.5",
+  "MetaTrader5>=5.0.5735",
+  "numpy>=2.0",
+  "pandas>=2.2",
+]
+
+[project.scripts]
+gscalp = "gscalp.cli:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+
