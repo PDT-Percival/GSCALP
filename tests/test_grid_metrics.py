@@ -5,9 +5,11 @@ import pytest
 
 from gscalp.grid_metrics import (
     GridMetrics,
+    LabeledBasket,
     bootstrap_expectancy_lower_bound,
     development_gate,
     summarize_baskets,
+    summarize_labeled_baskets,
     test_gate,
     validation_gate,
 )
@@ -90,6 +92,25 @@ def test_summarize_baskets_reports_fill_close_and_year_distribution_metrics():
     assert result.forced_close_rate == pytest.approx(1 / 3)
     assert result.average_levels_filled == pytest.approx(2.0)
     assert result.maximum_year_share == pytest.approx(2 / 3)
+
+
+def test_labeled_basket_summary_groups_metrics_by_partition_spread_and_volatility():
+    result = summarize_labeled_baskets(
+        [
+            LabeledBasket(basket(1, 0.40), "development", "tight", "low"),
+            LabeledBasket(basket(2, -1.00), "development", "wide", "high"),
+            LabeledBasket(basket(3, 0.20), "validation", "tight", "high"),
+            LabeledBasket(basket(4, 0.60), "validation", "tight", "low"),
+        ]
+    )
+
+    assert result.partition_metrics["development"].basket_count == 2
+    assert result.partition_metrics["development"].expectancy_r == pytest.approx(-0.30)
+    assert result.partition_metrics["validation"].max_drawdown_r == pytest.approx(0.0)
+    assert result.spread_regime_metrics["tight"].basket_count == 3
+    assert result.spread_regime_metrics["wide"].worst_basket_r == pytest.approx(-1.0)
+    assert result.volatility_regime_metrics["low"].profit_factor == float("inf")
+    assert result.volatility_regime_metrics["high"].expectancy_r == pytest.approx(-0.40)
 
 
 def test_bootstrap_is_deterministic_for_fixed_seed():

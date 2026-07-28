@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+from collections import defaultdict
 from dataclasses import dataclass
-from typing import Iterable, Sequence
+from types import MappingProxyType
+from typing import Iterable, Mapping, Sequence
 
 import numpy as np
 import pandas as pd
@@ -23,6 +25,21 @@ class GridMetrics:
     average_levels_filled: float
     maximum_year_share: float
     worst_basket_r: float
+
+
+@dataclass(frozen=True, slots=True)
+class LabeledBasket:
+    basket: BasketResult
+    partition: str
+    spread_regime: str
+    volatility_regime: str
+
+
+@dataclass(frozen=True, slots=True)
+class GridGroupedMetrics:
+    partition_metrics: Mapping[str, GridMetrics]
+    spread_regime_metrics: Mapping[str, GridMetrics]
+    volatility_regime_metrics: Mapping[str, GridMetrics]
 
 
 def maximum_consecutive_losses(net_r: Sequence[float] | np.ndarray) -> int:
@@ -61,6 +78,26 @@ def summarize_baskets(baskets: Iterable[BasketResult]) -> GridMetrics:
         ) if items else 0.0,
         maximum_year_share=float(years.max() / len(items)) if items else 1.0,
         worst_basket_r=float(net.min()) if len(net) else 0.0,
+    )
+
+
+def _summarize_groups(
+    labeled_baskets: Iterable[LabeledBasket], attribute: str
+) -> Mapping[str, GridMetrics]:
+    groups: defaultdict[str, list[BasketResult]] = defaultdict(list)
+    for item in labeled_baskets:
+        groups[getattr(item, attribute)].append(item.basket)
+    return MappingProxyType({label: summarize_baskets(items) for label, items in groups.items()})
+
+
+def summarize_labeled_baskets(
+    labeled_baskets: Iterable[LabeledBasket],
+) -> GridGroupedMetrics:
+    items = list(labeled_baskets)
+    return GridGroupedMetrics(
+        partition_metrics=_summarize_groups(items, "partition"),
+        spread_regime_metrics=_summarize_groups(items, "spread_regime"),
+        volatility_regime_metrics=_summarize_groups(items, "volatility_regime"),
     )
 
 
