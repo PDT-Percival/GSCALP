@@ -69,6 +69,8 @@ def test_grid_config_is_frozen_and_exactly_demo_scoped(tmp_path):
         ("absolute_risk_fraction", 0.0026),
         ("max_baskets_per_session", 2),
         ("level_fractions", [0.25, 0.50, 0.80]),
+        ("pivot_left", 1),
+        ("pivot_right", 1),
         ("pending_expiry_minute", 46),
         ("session_minutes", 59),
     ],
