@@ -1,4 +1,5 @@
 import json
+from pathlib import Path
 from types import SimpleNamespace
 
 from gscalp.cli import main
@@ -333,3 +334,155 @@ def test_pullback_backtest_command_delegates_to_partition_safe_runner(
         "status": "development_rejected",
         "application_can_trade": False,
     }
+
+
+def test_mt5_news_import_builds_exact_request_and_reports_nontrading_result(
+    tmp_path, capsys
+):
+    raw_events = tmp_path / "events.csv"
+    raw_metadata = tmp_path / "metadata.csv"
+    market = tmp_path / "market"
+    news = tmp_path / "news.csv"
+    artifacts = tmp_path / "artifacts"
+    calls = []
+
+    def coverage(version, count):
+        return SimpleNamespace(
+            strategy_version=version,
+            total_sessions=count,
+            counts={"clear": count},
+            coverage_complete=True,
+            all_sessions_clear=True,
+            ready=True,
+        )
+
+    def runner(request):
+        calls.append(request)
+        return SimpleNamespace(
+            status="complete",
+            manifest_path=artifacts / "manifest.json",
+            news_path=news,
+            raw_sha256="a" * 64,
+            normalized_sha256="b" * 64,
+            grid_coverage=coverage("grid-v1.0", 10),
+            pullback_coverage=coverage("pullback-v1.1", 15),
+            application_can_trade=False,
+        )
+
+    exit_code = main(
+        [
+            "mt5-news-import",
+            "--raw-events",
+            str(raw_events),
+            "--raw-metadata",
+            str(raw_metadata),
+            "--market-root",
+            str(market),
+            "--news-output",
+            str(news),
+            "--artifact-root",
+            str(artifacts),
+        ],
+        mt5_news_import_runner=runner,
+    )
+
+    assert exit_code == 0
+    assert len(calls) == 1
+    request = calls[0]
+    assert request.raw_events == raw_events
+    assert request.raw_metadata == raw_metadata
+    assert request.mq5_source == Path("mt5/GSCALP_NewsExport.mq5")
+    assert request.market_root == market
+    assert request.news_output == news
+    assert request.artifact_root == artifacts
+    assert request.grid_config == Path("config/grid-v1.0.json")
+    assert request.pullback_config == Path("config/pullback-v1.1.json")
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["status"] == "complete"
+    assert payload["raw_sha256"] == "a" * 64
+    assert payload["normalized_sha256"] == "b" * 64
+    assert payload["grid_coverage"]["coverage_complete"] is True
+    assert payload["pullback_coverage"]["total_sessions"] == 15
+    assert payload["application_can_trade"] is False
+
+
+def test_mt5_news_import_returns_two_when_result_is_not_complete(tmp_path, capsys):
+    def runner(request):
+        coverage = SimpleNamespace(
+            strategy_version="grid-v1.0",
+            total_sessions=1,
+            counts={"missing_date_confirmation": 1},
+            coverage_complete=False,
+            all_sessions_clear=False,
+            ready=False,
+        )
+        return SimpleNamespace(
+            status="incomplete",
+            manifest_path=tmp_path / "manifest.json",
+            news_path=tmp_path / "news.csv",
+            raw_sha256="a" * 64,
+            normalized_sha256="",
+            grid_coverage=coverage,
+            pullback_coverage=coverage,
+            application_can_trade=False,
+        )
+
+    exit_code = main(
+        [
+            "mt5-news-import",
+            "--raw-events",
+            str(tmp_path / "events.csv"),
+            "--raw-metadata",
+            str(tmp_path / "metadata.csv"),
+        ],
+        mt5_news_import_runner=runner,
+    )
+
+    assert exit_code == 2
+    assert json.loads(capsys.readouterr().out)["status"] == "incomplete"
+
+
+def test_pullback_news_coverage_command_writes_full_report(tmp_path, capsys):
+    config = tmp_path / "pullback-v1.1.json"
+    market = tmp_path / "market"
+    news = tmp_path / "news.csv"
+    output = tmp_path / "pullback-coverage.json"
+    calls = []
+
+    class Report:
+        def to_json_dict(self):
+            return {
+                "strategy_version": "pullback-v1.1",
+                "total_sessions": 1,
+                "counts": {"overlapping_blackout": 1},
+                "coverage_complete": True,
+                "all_sessions_clear": False,
+                "ready": True,
+                "items": [{"local_date": "2020-01-02"}],
+            }
+
+    def runner(config_path, market_root, news_path):
+        calls.append((config_path, market_root, news_path))
+        return Report()
+
+    exit_code = main(
+        [
+            "pullback-news-coverage",
+            "--config",
+            str(config),
+            "--market-root",
+            str(market),
+            "--news",
+            str(news),
+            "--output",
+            str(output),
+        ],
+        pullback_news_coverage_runner=runner,
+    )
+
+    assert exit_code == 0
+    assert calls == [(config, market, news)]
+    assert "items" not in json.loads(capsys.readouterr().out)
+    assert json.loads(output.read_text(encoding="utf-8"))["items"] == [
+        {"local_date": "2020-01-02"}
+    ]

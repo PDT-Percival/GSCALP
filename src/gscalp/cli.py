@@ -65,6 +65,44 @@ def _parser() -> argparse.ArgumentParser:
     grid_news.add_argument("--market-root", type=Path, default=Path("artifacts/market"))
     grid_news.add_argument("--news", type=Path, default=Path("data/news_blackouts.csv"))
     grid_news.add_argument("--output", type=Path)
+    pullback_news = commands.add_parser(
+        "pullback-news-coverage",
+        help="verify explicit source-backed news coverage for pullback sessions",
+    )
+    pullback_news.add_argument(
+        "--config", type=Path, default=Path("config/pullback-v1.1.json")
+    )
+    pullback_news.add_argument(
+        "--market-root", type=Path, default=Path("artifacts/market")
+    )
+    pullback_news.add_argument(
+        "--news", type=Path, default=Path("data/news_blackouts.csv")
+    )
+    pullback_news.add_argument("--output", type=Path)
+    mt5_news = commands.add_parser(
+        "mt5-news-import",
+        help="validate and publish a non-trading MT5 economic-calendar export",
+    )
+    mt5_news.add_argument("--raw-events", type=Path, required=True)
+    mt5_news.add_argument("--raw-metadata", type=Path, required=True)
+    mt5_news.add_argument(
+        "--mq5-source", type=Path, default=Path("mt5/GSCALP_NewsExport.mq5")
+    )
+    mt5_news.add_argument(
+        "--market-root", type=Path, default=Path("artifacts/market")
+    )
+    mt5_news.add_argument(
+        "--news-output", type=Path, default=Path("data/news_blackouts.csv")
+    )
+    mt5_news.add_argument(
+        "--artifact-root", type=Path, default=Path("artifacts/news/mt5-calendar")
+    )
+    mt5_news.add_argument(
+        "--grid-config", type=Path, default=Path("config/grid-v1.0.json")
+    )
+    mt5_news.add_argument(
+        "--pullback-config", type=Path, default=Path("config/pullback-v1.1.json")
+    )
     shadow = commands.add_parser("shadow", help="run non-trading forward logger")
     shadow.add_argument("--config", type=Path, default=Path("config/strategy.json"))
     shadow.add_argument("--summary", type=Path, default=Path("artifacts/reports/v0.1-summary.json"))
@@ -80,6 +118,8 @@ def main(
     grid_runner: Callable[[Path, Path, Path], Any] | None = None,
     grid_news_coverage_runner: Callable[[Path, Path, Path], Any] | None = None,
     pullback_runner: Callable[..., Any] | None = None,
+    pullback_news_coverage_runner: Callable[[Path, Path, Path], Any] | None = None,
+    mt5_news_import_runner: Callable[[Any], Any] | None = None,
 ) -> int:
     args = _parser().parse_args(argv)
     if args.command == "doctor":
@@ -234,6 +274,82 @@ def main(
             summary_payload["output"] = str(args.output)
         print(json.dumps(summary_payload, indent=2, allow_nan=False))
         return 0 if payload.get("ready", False) else 2
+    if args.command == "pullback-news-coverage":
+        if pullback_news_coverage_runner is None:
+            from .pullback_config import load_pullback_config
+            from .pullback_news_coverage import build_news_coverage_report
+
+            def pullback_news_coverage_runner(
+                config_path: Path,
+                market_root: Path,
+                news_path: Path,
+            ):
+                return build_news_coverage_report(
+                    load_pullback_config(config_path), market_root, news_path
+                )
+
+        report = pullback_news_coverage_runner(
+            args.config, args.market_root, args.news
+        )
+        payload = report.to_json_dict() if hasattr(report, "to_json_dict") else report
+        if args.output is not None:
+            args.output.parent.mkdir(parents=True, exist_ok=True)
+            args.output.write_text(
+                json.dumps(payload, indent=2, allow_nan=False), encoding="utf-8"
+            )
+        summary_payload = {
+            key: value for key, value in payload.items() if key != "items"
+        }
+        if args.output is not None:
+            summary_payload["output"] = str(args.output)
+        print(json.dumps(summary_payload, indent=2, allow_nan=False))
+        return 0 if payload.get("ready", False) else 2
+    if args.command == "mt5-news-import":
+        if mt5_news_import_runner is None:
+            from .mt5_calendar_pipeline import run_mt5_calendar_import
+
+            mt5_news_import_runner = run_mt5_calendar_import
+        from .mt5_calendar_pipeline import CalendarImportRequest
+
+        request = CalendarImportRequest(
+            raw_events=args.raw_events,
+            raw_metadata=args.raw_metadata,
+            mq5_source=args.mq5_source,
+            market_root=args.market_root,
+            news_output=args.news_output,
+            artifact_root=args.artifact_root,
+            grid_config=args.grid_config,
+            pullback_config=args.pullback_config,
+        )
+        result = mt5_news_import_runner(request)
+
+        def coverage_summary(coverage: Any) -> dict[str, Any]:
+            return {
+                "strategy_version": coverage.strategy_version,
+                "total_sessions": coverage.total_sessions,
+                "counts": coverage.counts,
+                "coverage_complete": coverage.coverage_complete,
+                "all_sessions_clear": coverage.all_sessions_clear,
+                "ready": coverage.ready,
+            }
+
+        payload = {
+            "status": result.status,
+            "manifest_path": str(result.manifest_path),
+            "news_path": str(result.news_path),
+            "raw_sha256": result.raw_sha256,
+            "normalized_sha256": result.normalized_sha256,
+            "grid_coverage": coverage_summary(result.grid_coverage),
+            "pullback_coverage": coverage_summary(result.pullback_coverage),
+            "application_can_trade": False,
+        }
+        print(json.dumps(payload, indent=2, allow_nan=False))
+        complete = (
+            result.status == "complete"
+            and result.grid_coverage.coverage_complete
+            and result.pullback_coverage.coverage_complete
+        )
+        return 0 if complete else 2
     if args.command == "shadow":
         load_config(args.config)
         summary = json.loads(args.summary.read_text(encoding="utf-8"))
