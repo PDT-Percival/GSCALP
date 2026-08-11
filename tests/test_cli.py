@@ -287,3 +287,49 @@ def test_grid_news_coverage_command_writes_full_output(tmp_path, capsys):
     assert json.loads(output.read_text(encoding="utf-8"))["items"] == [
         {"local_date": "2020-01-02"}
     ]
+
+
+def test_pullback_backtest_command_delegates_to_partition_safe_runner(
+    tmp_path, capsys
+):
+    config = tmp_path / "pullback-v1.1.json"
+    config.write_text("{}", encoding="utf-8")
+    market = tmp_path / "canonical-market"
+    news = tmp_path / "news.csv"
+    output = tmp_path / "pullback-reports"
+    calls = []
+
+    class Summary:
+        def to_json_dict(self):
+            return {
+                "version": "pullback-v1.1",
+                "status": "development_rejected",
+                "application_can_trade": False,
+            }
+
+    def runner(config_path, market_root, output_dir, *, news_path):
+        calls.append((config_path, market_root, output_dir, news_path))
+        return Summary()
+
+    exit_code = main(
+        [
+            "pullback-backtest",
+            "--config",
+            str(config),
+            "--market-root",
+            str(market),
+            "--news",
+            str(news),
+            "--output",
+            str(output),
+        ],
+        pullback_runner=runner,
+    )
+
+    assert exit_code == 0
+    assert calls == [(config, market, output, news)]
+    assert json.loads(capsys.readouterr().out) == {
+        "version": "pullback-v1.1",
+        "status": "development_rejected",
+        "application_can_trade": False,
+    }

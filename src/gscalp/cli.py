@@ -44,6 +44,19 @@ def _parser() -> argparse.ArgumentParser:
     grid.add_argument("--config", type=Path, default=Path("config/grid-v1.0.json"))
     grid.add_argument("--market-root", type=Path, default=Path("artifacts/market"))
     grid.add_argument("--output", type=Path, default=Path("artifacts/reports"))
+    pullback = commands.add_parser(
+        "pullback-backtest", help="run frozen pullback v1.1 research"
+    )
+    pullback.add_argument(
+        "--config", type=Path, default=Path("config/pullback-v1.1.json")
+    )
+    pullback.add_argument(
+        "--market-root", type=Path, default=Path("artifacts/market")
+    )
+    pullback.add_argument(
+        "--news", type=Path, default=Path("data/news_blackouts.csv")
+    )
+    pullback.add_argument("--output", type=Path, default=Path("artifacts/reports"))
     grid_news = commands.add_parser(
         "grid-news-coverage",
         help="verify explicit source-backed news coverage for grid sessions",
@@ -66,6 +79,7 @@ def main(
     recalibration_runner: Callable[[Path, Path, Path], dict[str, Any]] | None = None,
     grid_runner: Callable[[Path, Path, Path], Any] | None = None,
     grid_news_coverage_runner: Callable[[Path, Path, Path], Any] | None = None,
+    pullback_runner: Callable[..., Any] | None = None,
 ) -> int:
     args = _parser().parse_args(argv)
     if args.command == "doctor":
@@ -170,6 +184,26 @@ def main(
             grid_runner = run_grid_research
         report = grid_runner(args.config, args.market_root, args.output)
         payload = asdict(report) if is_dataclass(report) else report
+        print(json.dumps(payload, indent=2, allow_nan=False))
+        return 0
+    if args.command == "pullback-backtest":
+        if pullback_runner is None:
+            from .pullback_pipeline import run_pullback_research
+
+            pullback_runner = run_pullback_research
+        report = pullback_runner(
+            args.config,
+            args.market_root,
+            args.output,
+            news_path=args.news,
+        )
+        payload = (
+            report.to_json_dict()
+            if hasattr(report, "to_json_dict")
+            else asdict(report)
+            if is_dataclass(report)
+            else report
+        )
         print(json.dumps(payload, indent=2, allow_nan=False))
         return 0
     if args.command == "grid-news-coverage":
