@@ -10,6 +10,7 @@ from gscalp.pullback_pipeline import (
     CandidateEvaluation,
     ParquetPullbackSource,
     PartitionEvaluation,
+    session_bar_context,
     run_pullback_research,
 )
 
@@ -366,6 +367,37 @@ def test_development_spread_ceiling_is_exact_window_quantile(tmp_path):
     assert source.development_spread_ceilings["09:30-10:30"] == pytest.approx(0.46)
 
 
+def test_tick_batch_returns_session_keyed_frames(tmp_path):
+    market = canonical_market(tmp_path)
+    news = tmp_path / "news.csv"
+    news.write_text(
+        "event_start_utc,event_end_utc,currency,impact,event_name,source\n",
+        encoding="utf-8",
+    )
+    source = ParquetPullbackSource(
+        load_pullback_config("config/pullback-v1.1.json"), market, news_path=news
+    )
+    local_date = pd.Timestamp("2020-01-02").date()
+
+    batches = source._load_tick_batch([local_date], ("09:30-10:30",))
+
+    frame = batches[("09:30-10:30", local_date)]
+    assert list(frame.columns) == ["bid", "ask"]
+    assert frame.index.tz is not None
+    assert list(frame.index) == list(
+        pd.to_datetime(
+            [
+                "2020-01-02 14:29:00Z",
+                "2020-01-02 14:30:00Z",
+                "2020-01-02 14:31:00Z",
+                "2020-01-02 14:32:00Z",
+                "2020-01-02 14:33:00Z",
+                "2020-01-02 14:34:00Z",
+            ]
+        )
+    )
+
+
 def test_missing_news_blocks_candidate_before_any_signal_evaluation(tmp_path):
     market = canonical_market(tmp_path)
     config = load_pullback_config("config/pullback-v1.1.json")
@@ -454,3 +486,21 @@ def test_source_runs_one_causal_session_from_bias_through_tick_exit(tmp_path):
     assert item.trades[0].entry_time == pd.Timestamp("2026-07-15 13:56:00+00:00")
     assert item.trades[0].exit_time == pd.Timestamp("2026-07-15 13:57:00+00:00")
     assert item.trades[0].reason.value == "target_closed"
+
+
+def test_session_bar_context_discards_unrelated_partition_history():
+    index = pd.date_range("2020-01-01", periods=10_000, freq="1min", tz="UTC")
+    bars = pd.DataFrame({"close": range(10_000)}, index=index)
+    session_start = index[8_000]
+    session_end = session_start + pd.Timedelta(minutes=60)
+
+    context = session_bar_context(
+        bars,
+        session_start,
+        session_end,
+        warmup_rows=40,
+    )
+
+    assert len(context) == 100
+    assert context.index[0] == index[7_960]
+    assert context.index[-1] == index[8_059]

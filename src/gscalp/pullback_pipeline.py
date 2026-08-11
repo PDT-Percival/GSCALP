@@ -38,7 +38,7 @@ from .pullback_metrics import (
 from .pullback_models import PullbackReason, TradeDirection, TradeResult
 from .pullback_setup import detect_pullback_setup
 from .pullback_sizing import ProfitMarginCalculator, size_trade
-from .research import TickParquetStore, new_york_session_bounds
+from .research import new_york_session_bounds
 
 
 _PREFIX = "pullback-v1.1"
@@ -317,6 +317,28 @@ def _by_candidate(result: PartitionEvaluation) -> dict[str, CandidateEvaluation]
     return {item.candidate_id: item for item in result.candidates}
 
 
+def session_bar_context(
+    bars: pd.DataFrame,
+    session_start: pd.Timestamp,
+    session_end: pd.Timestamp,
+    *,
+    warmup_rows: int,
+) -> pd.DataFrame:
+    if not isinstance(bars.index, pd.DatetimeIndex) or bars.index.tz is None:
+        raise ValueError("bars must have a timezone-aware DatetimeIndex")
+    if session_start.tzinfo is None or session_end.tzinfo is None:
+        raise ValueError("session bounds must be timezone-aware")
+    if not bars.index.is_monotonic_increasing or not bars.index.is_unique:
+        raise ValueError("bars must be sorted and unique")
+    if warmup_rows < 0 or session_end <= session_start:
+        raise ValueError("session context bounds are invalid")
+    start = session_start.tz_convert(bars.index.tz)
+    end = session_end.tz_convert(bars.index.tz)
+    left = int(bars.index.searchsorted(start, side="left"))
+    right = int(bars.index.searchsorted(end, side="left"))
+    return bars.iloc[max(0, left - warmup_rows) : right]
+
+
 def run_pullback_research(
     config_path: Path | str,
     market_root: Path | str,
@@ -576,8 +598,10 @@ class ParquetPullbackSource:
         }
         if not intervals:
             return
+        years = {local_date.year for local_date in candidate_dates}
+        partition = f"year={next(iter(years))}" if len(years) == 1 else "year=*"
         pattern = (
-            (self.market_root / "ticks" / "year=*" / "ticks.parquet")
+            (self.market_root / "ticks" / partition / "ticks.parquet")
             .resolve()
             .as_posix()
             .replace("'", "''")
@@ -601,6 +625,100 @@ class ParquetPullbackSource:
             connection.close()
         for window, ceiling in result:
             self.development_spread_ceilings[str(window)] = float(ceiling)
+
+    def _load_tick_batch(
+        self,
+        candidate_dates: list[date],
+        windows: tuple[str, ...],
+    ) -> dict[tuple[str, date], pd.DataFrame]:
+        empty = lambda: pd.DataFrame(
+            columns=["bid", "ask"],
+            index=pd.DatetimeIndex([], name="Timestamp", tz="UTC"),
+        )
+        batches = {
+            (window, local_date): empty()
+            for window in windows
+            for local_date in candidate_dates
+        }
+        intervals: list[dict[str, Any]] = []
+        for window in windows:
+            for local_date in candidate_dates:
+                session_start, session_end = new_york_session_bounds(
+                    local_date,
+                    window,
+                )
+                intervals.append(
+                    {
+                        "window": window,
+                        "local_date": local_date,
+                        "start_utc": (
+                            session_start
+                            - pd.Timedelta(
+                                minutes=self.config.reference_spread_minutes
+                            )
+                        ).tz_localize(None),
+                        "end_utc": session_end.tz_localize(None),
+                    }
+                )
+        if not intervals:
+            return batches
+        years = {local_date.year for local_date in candidate_dates}
+        partition = f"year={next(iter(years))}" if len(years) == 1 else "year=*"
+        pattern = (
+            (self.market_root / "ticks" / partition / "ticks.parquet")
+            .resolve()
+            .as_posix()
+            .replace("'", "''")
+        )
+        connection = duckdb.connect()
+        try:
+            connection.register("intervals", pd.DataFrame(intervals))
+            frame = connection.execute(
+                f"""
+                SELECT i.window AS session_window,
+                       i.local_date,
+                       t.Timestamp,
+                       t.Bid,
+                       t.Ask
+                FROM read_parquet('{pattern}', hive_partitioning=true) AS t
+                JOIN intervals AS i
+                  ON t.Timestamp >= i.start_utc
+                 AND t.Timestamp < i.end_utc
+                ORDER BY session_window, local_date, Timestamp
+                """
+            ).df()
+        finally:
+            connection.close()
+        if frame.empty:
+            return batches
+        frame["Timestamp"] = pd.to_datetime(frame["Timestamp"], utc=True)
+        for (window, local_date), group in frame.groupby(
+            ["session_window", "local_date"],
+            sort=False,
+        ):
+            key = (
+                str(window),
+                pd.Timestamp(local_date).date(),
+            )
+            batches[key] = group.set_index("Timestamp")[["Bid", "Ask"]].rename(
+                columns={"Bid": "bid", "Ask": "ask"}
+            )
+        return batches
+
+    def _iter_window_markets(
+        self,
+        window: str,
+        candidate_dates: list[date],
+    ):
+        months: dict[tuple[int, int], list[date]] = {}
+        for local_date in candidate_dates:
+            months.setdefault((local_date.year, local_date.month), []).append(
+                local_date
+            )
+        for dates in months.values():
+            batch = self._load_tick_batch(dates, (window,))
+            for local_date in dates:
+                yield local_date, batch[(window, local_date)]
 
     def load_development(self) -> PartitionEvaluation:
         candidate_ids = tuple(item.candidate_id for item in self.config.candidates())
@@ -688,10 +806,6 @@ class ParquetPullbackSource:
         by_window: dict[str, list[PullbackCandidate]] = {}
         for item in selected:
             by_window.setdefault(item.session_ny, []).append(item)
-        tick_store = TickParquetStore(
-            self.market_root / "ticks" / "year=*" / "ticks.parquet"
-        )
-
         def reject(
             candidates: list[PullbackCandidate],
             local_date: date,
@@ -712,7 +826,10 @@ class ParquetPullbackSource:
 
         for window, window_candidates in by_window.items():
             ceiling = self.development_spread_ceilings[window]
-            for local_date in candidate_dates:
+            for local_date, market in self._iter_window_markets(
+                window,
+                candidate_dates,
+            ):
                 session_start, session_end = new_york_session_bounds(
                     local_date,
                     window,
@@ -727,11 +844,6 @@ class ParquetPullbackSource:
                         news_block,
                     )
                     continue
-                market = tick_store.slice(
-                    session_start
-                    - pd.Timedelta(minutes=self.config.reference_spread_minutes),
-                    session_end,
-                )
                 reference = market.loc[
                     (market.index >= session_start - pd.Timedelta(minutes=30))
                     & (market.index < session_start)
@@ -752,9 +864,35 @@ class ParquetPullbackSource:
                 reference_spread = float(
                     (reference["ask"] - reference["bid"]).median()
                 )
+                local_bars = {
+                    "M1": session_bar_context(
+                        bars["M1"],
+                        session_start,
+                        session_end,
+                        warmup_rows=20,
+                    ),
+                    "M5": session_bar_context(
+                        bars["M5"],
+                        session_start,
+                        session_end,
+                        warmup_rows=40,
+                    ),
+                    "M15": session_bar_context(
+                        bars["M15"],
+                        session_start,
+                        session_end,
+                        warmup_rows=30,
+                    ),
+                    "H1": session_bar_context(
+                        bars["H1"],
+                        session_start,
+                        session_end,
+                        warmup_rows=30,
+                    ),
+                }
                 locked_bias = evaluate_locked_bias(
-                    bars["H1"],
-                    bars["M15"],
+                    local_bars["H1"],
+                    local_bars["M15"],
                     session_start,
                     self.config,
                 )
@@ -768,8 +906,8 @@ class ParquetPullbackSource:
                     continue
                 for candidate in window_candidates:
                     setup_decision = detect_pullback_setup(
-                        bars["M1"],
-                        bars["M5"],
+                        local_bars["M1"],
+                        local_bars["M5"],
                         locked_bias,
                         candidate,
                         session_start,
@@ -829,9 +967,9 @@ class ParquetPullbackSource:
                         )
                         continue
                     abort_bars = (
-                        bars["M1"]
+                        local_bars["M1"]
                         if candidate.abort_timeframe == "M1"
-                        else bars["M5"]
+                        else local_bars["M5"]
                     )
                     simulations = {
                         "base": simulate_trade(
