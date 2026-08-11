@@ -68,17 +68,16 @@ class BiasDecision:
     direction: TradeDirection | None
     reason: PullbackReason
     session_start: pd.Timestamp
-    h1_close: float
-    h1_ema_now: float
-    h1_ema_three_bars_ago: float
-    m15_close: float
-    m15_ema_now: float
-    m15_ema_three_bars_ago: float
+    h1_close: float | None
+    h1_ema_now: float | None
+    h1_ema_three_bars_ago: float | None
+    m15_close: float | None
+    m15_ema_now: float | None
+    m15_ema_three_bars_ago: float | None
 
     def __post_init__(self) -> None:
         _aware(self.session_start)
-        _positive(
-            "bias values",
+        values = (
             self.h1_close,
             self.h1_ema_now,
             self.h1_ema_three_bars_ago,
@@ -86,6 +85,13 @@ class BiasDecision:
             self.m15_ema_now,
             self.m15_ema_three_bars_ago,
         )
+        if any(value is None for value in values):
+            if not all(value is None for value in values):
+                raise ValueError("bias values must be either complete or unavailable")
+            if self.direction is not None:
+                raise ValueError("direction requires complete bias values")
+        else:
+            _positive("bias values", *(float(value) for value in values))
 
 
 @dataclass(frozen=True, slots=True)
