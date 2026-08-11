@@ -4,6 +4,7 @@ import math
 from dataclasses import dataclass
 from zoneinfo import ZoneInfo
 
+import numpy as np
 import pandas as pd
 
 from .indicators import ema
@@ -170,58 +171,46 @@ def simulate_trade(
         if item > first_time and item < end
     )
 
-    for timestamp, row in eligible.iloc[1:].iterrows():
-        executable = (
-            float(row["bid"])
-            if plan.setup.direction is TradeDirection.LONG
-            else float(row["ask"])
+    exit_quotes = eligible.iloc[1:]
+    executable = exit_quotes[
+        "bid" if plan.setup.direction is TradeDirection.LONG else "ask"
+    ].to_numpy(dtype=float, copy=False)
+    if plan.setup.direction is TradeDirection.LONG:
+        stopped = executable <= plan.setup.stop
+        targeted = executable >= plan.target
+    else:
+        stopped = executable >= plan.setup.stop
+        targeted = executable <= plan.target
+
+    sentinel = len(exit_quotes)
+    stop_hits = np.flatnonzero(stopped)
+    target_hits = np.flatnonzero(targeted)
+    stop_position = int(stop_hits[0]) if stop_hits.size else sentinel
+    target_position = int(target_hits[0]) if target_hits.size else sentinel
+    abort_position = sentinel
+    if abort_times and not exit_quotes.empty:
+        abort_position = int(
+            exit_quotes.index.searchsorted(min(abort_times), side="left")
         )
-        stopped = (
-            executable <= plan.setup.stop
-            if plan.setup.direction is TradeDirection.LONG
-            else executable >= plan.setup.stop
+    position = min(stop_position, target_position, abort_position)
+    if position < sentinel:
+        if position == stop_position:
+            reason = ExitReason.STOPPED
+        elif position == target_position:
+            reason = ExitReason.TARGET_CLOSED
+        else:
+            reason = ExitReason.MOMENTUM_ABORT
+        return _close_trade(
+            plan,
+            entry_time=first_time,
+            entry_price=entry_price,
+            entry_spread=first_spread,
+            exit_time=exit_quotes.index[position],
+            exit_price=float(executable[position]),
+            reason=reason,
+            contract_size=contract_size,
+            stress=stress,
         )
-        if stopped:
-            return _close_trade(
-                plan,
-                entry_time=first_time,
-                entry_price=entry_price,
-                entry_spread=first_spread,
-                exit_time=timestamp,
-                exit_price=executable,
-                reason=ExitReason.STOPPED,
-                contract_size=contract_size,
-                stress=stress,
-            )
-        targeted = (
-            executable >= plan.target
-            if plan.setup.direction is TradeDirection.LONG
-            else executable <= plan.target
-        )
-        if targeted:
-            return _close_trade(
-                plan,
-                entry_time=first_time,
-                entry_price=entry_price,
-                entry_spread=first_spread,
-                exit_time=timestamp,
-                exit_price=executable,
-                reason=ExitReason.TARGET_CLOSED,
-                contract_size=contract_size,
-                stress=stress,
-            )
-        if any(item <= timestamp for item in abort_times):
-            return _close_trade(
-                plan,
-                entry_time=first_time,
-                entry_price=entry_price,
-                entry_spread=first_spread,
-                exit_time=timestamp,
-                exit_price=executable,
-                reason=ExitReason.MOMENTUM_ABORT,
-                contract_size=contract_size,
-                stress=stress,
-            )
 
     final_time = eligible.index[-1]
     final_row = eligible.iloc[-1]

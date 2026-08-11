@@ -199,6 +199,27 @@ def test_target_available_at_abort_boundary_wins_before_abort():
     assert result.reason is ExitReason.TARGET_CLOSED
 
 
+def test_tick_exit_scan_is_vectorized_without_dataframe_row_iteration(monkeypatch):
+    market = ticks(
+        [
+            (AVAILABLE, 99.8, 100.0),
+            (AVAILABLE + pd.Timedelta(seconds=1), 100.1, 100.3),
+            (AVAILABLE + pd.Timedelta(seconds=2), 100.5, 100.7),
+        ]
+    )
+
+    monkeypatch.setattr(
+        pd.DataFrame,
+        "iterrows",
+        lambda _self: pytest.fail("tick exits must use a vectorized first-event scan"),
+    )
+
+    result = simulate_trade(make_plan(), market, empty_abort_bars(), END, 100.0)
+
+    assert result.reason is ExitReason.TARGET_CLOSED
+    assert result.trade.exit_time == AVAILABLE + pd.Timedelta(seconds=2)
+
+
 def test_spread_stress_never_improves_long_entry():
     market = ticks(
         [
@@ -237,4 +258,3 @@ def test_tick_input_must_be_utc_sorted_and_unique(problem):
 
     with pytest.raises(ValueError):
         simulate_trade(make_plan(), market, empty_abort_bars(), END, 100.0)
-

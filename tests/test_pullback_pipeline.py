@@ -472,8 +472,12 @@ def test_unarmed_setup_does_not_materialize_session_ticks(tmp_path, monkeypatch)
     )
     config = load_pullback_config("config/pullback-v1.1.json")
     source = ParquetPullbackSource(config, market, news_path=news)
-    selected = config.candidates()[12]
-    source.development_spread_ceilings[selected.session_ny] = 0.30
+    selected_window = config.candidates()[12].session_ny
+    selected = tuple(
+        item for item in config.candidates() if item.session_ny == selected_window
+    )
+    source.development_spread_ceilings[selected_window] = 0.30
+    detection_calls = []
 
     def bullish_bias(_h1, _m15, session_start, _config):
         return BiasDecision(
@@ -489,11 +493,11 @@ def test_unarmed_setup_does_not_materialize_session_ticks(tmp_path, monkeypatch)
         )
 
     monkeypatch.setattr(pipeline, "evaluate_locked_bias", bullish_bias)
-    monkeypatch.setattr(
-        pipeline,
-        "detect_pullback_setup",
-        lambda *_args, **_kwargs: SetupDecision(None, PullbackReason.NO_PULLBACK),
-    )
+    def no_setup(_m1, _m5, _bias, candidate, *_args, **_kwargs):
+        detection_calls.append(candidate.trigger_timeframe)
+        return SetupDecision(None, PullbackReason.NO_PULLBACK)
+
+    monkeypatch.setattr(pipeline, "detect_pullback_setup", no_setup)
     monkeypatch.setattr(
         source,
         "_load_tick_batch",
@@ -506,10 +510,11 @@ def test_unarmed_setup_does_not_materialize_session_ticks(tmp_path, monkeypatch)
         "validation",
         pd.Timestamp("2020-01-02").date(),
         pd.Timestamp("2020-01-02").date(),
-        (selected.candidate_id,),
+        tuple(item.candidate_id for item in selected),
     )
 
-    assert result.candidates[0].reason_counts == {"no_pullback": 1}
+    assert detection_calls == ["M1", "M5"]
+    assert all(item.reason_counts == {"no_pullback": 1} for item in result.candidates)
 
 
 def test_missing_news_blocks_candidate_before_any_signal_evaluation(tmp_path):

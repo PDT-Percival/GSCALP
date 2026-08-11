@@ -6,7 +6,7 @@ import json
 import math
 import os
 from collections import Counter
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
 from typing import Any, Mapping, Protocol
@@ -1075,17 +1075,25 @@ class ParquetPullbackSource:
                     continue
                 setup_decisions: dict[str, Any] = {}
                 armed_candidates: list[PullbackCandidate] = []
+                detected_by_trigger: dict[str, Any] = {}
                 for candidate in window_candidates:
-                    setup_decision = detect_pullback_setup(
-                        local_bars["M1"],
-                        local_bars["M5"],
-                        locked_bias,
-                        candidate,
-                        session_start,
-                        session_end,
-                        reference_spread,
-                        self.config,
+                    setup_decision = detected_by_trigger.get(
+                        candidate.trigger_timeframe
                     )
+                    if setup_decision is None:
+                        setup_decision = detect_pullback_setup(
+                            local_bars["M1"],
+                            local_bars["M5"],
+                            locked_bias,
+                            candidate,
+                            session_start,
+                            session_end,
+                            reference_spread,
+                            self.config,
+                        )
+                        detected_by_trigger[candidate.trigger_timeframe] = (
+                            setup_decision
+                        )
                     if setup_decision.setup is None:
                         reject(
                             [candidate],
@@ -1094,6 +1102,10 @@ class ParquetPullbackSource:
                             setup_decision.reason.value,
                         )
                         continue
+                    setup_decision = replace(
+                        setup_decision,
+                        setup=replace(setup_decision.setup, candidate=candidate),
+                    )
                     armed_candidates.append(candidate)
                     setup_decisions[candidate.candidate_id] = setup_decision
                 if armed_candidates:
