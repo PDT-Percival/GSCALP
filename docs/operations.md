@@ -53,6 +53,31 @@ python -m gscalp.cli download --config config/strategy.json --days 180 --timefra
 Raw Tickstory CSV files are immutable. Canonical parquet data and generated
 reports live under `artifacts/`.
 
+## Source-backed MT5 calendar export
+
+The calendar exporter is a read-only MQL5 script pinned to the approved FBS
+installation and the already connected `FBS-Demo` hedging account. The FBS
+terminal must be closed normally before starting this workflow. The runner
+never terminates an existing terminal process; it refuses to start if that
+exact executable is running. Its temporary startup configuration disables live
+trading and DLL imports, and asks the terminal it launched to shut down normally
+after the one-shot script exits.
+
+From the repository root, run:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/run_mt5_calendar_export.ps1
+python -m gscalp.cli mt5-news-import `
+  --raw-events artifacts/news/mt5-calendar/incoming/mt5_calendar_events.csv `
+  --raw-metadata artifacts/news/mt5-calendar/incoming/mt5_calendar_metadata.csv
+```
+
+The runner resolves the FBS data folder from `origin.txt`, compiles with the FBS
+MetaEditor, requires `0 errors, 0 warnings`, and copies the raw CSV bytes only
+after both files exist and metadata reports `export_status=complete`. A nonzero
+runner or importer result is fail-closed and preserves the previous canonical
+news file. It never enables order submission or promotes a strategy.
+
 ## Version 0.1 result and current decision
 
 The frozen rules evaluated 3,366 candidate sessions from 2 January 2020 through
