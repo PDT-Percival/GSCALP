@@ -341,9 +341,12 @@ class CandidateSession:
     end_utc: pd.Timestamp
 ```
 
-Read distinct M5 UTC dates with DuckDB, preserve the existing `-1/0/+1 day`
-New York candidate logic, deduplicate, and call `new_york_session_bounds`.
-Refactor the grid module into a compatibility wrapper.
+Read distinct M5 timestamps with DuckDB, parse them as UTC, convert each actual
+timestamp to `America/New_York`, and deduplicate the resulting local dates. This
+must match the date derivation in both historical pipelines and must not retain
+the existing coverage helper's over-inclusive `-1/0/+1 day` heuristic. Then call
+`new_york_session_bounds` and refactor the grid module into a compatibility
+wrapper.
 
 - [ ] **Step 4: Pass common and compatibility tests**
 
