@@ -52,6 +52,18 @@ def test_exporter_has_exact_read_only_safety_contract():
     assert not present, f"forbidden trading or persistent API tokens: {present}"
 
 
+def test_exporter_waits_bounded_time_for_startup_connection_before_validation():
+    source = SOURCE.read_text(encoding="utf-8")
+
+    assert "WaitForConnectedTerminal" in source
+    assert "GetTickCount64" in source
+    assert "Sleep(250)" in source
+    assert "CONNECTION_TIMEOUT_MS" in source
+    assert source.index("WaitForConnectedTerminal(CONNECTION_TIMEOUT_MS") < source.index(
+        "ValidateEnvironment(failure)"
+    )
+
+
 def test_exporter_uses_partial_files_and_publishes_complete_metadata_last():
     source = SOURCE.read_text(encoding="utf-8")
 

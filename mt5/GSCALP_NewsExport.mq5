@@ -11,6 +11,7 @@
 
 const datetime REQUESTED_FROM_SERVER = D'2020.01.01 00:00:00';
 const datetime REQUESTED_TO_SERVER = D'2026.08.01 00:00:00';
+const uint CONNECTION_TIMEOUT_MS = 60000;
 const string EVENT_HEADER = "query_currency,query_start_server,query_end_server,query_count,query_error,value_id,event_id,event_time_server,event_time_mode_code,event_time_mode_name,event_importance_code,event_importance_name,country_id,event_code,event_name,source_url";
 
 
@@ -100,6 +101,27 @@ void CleanupPartialFiles()
    if(FileIsExist(METADATA_PARTIAL_FILE))
       FileDelete(METADATA_PARTIAL_FILE);
    ResetLastError();
+  }
+
+
+bool WaitForConnectedTerminal(const uint timeout_ms,string &failure)
+  {
+   ulong started=GetTickCount64();
+   while(!TerminalInfoInteger(TERMINAL_CONNECTED))
+     {
+      if(IsStopped())
+        {
+         failure="script stopped while waiting for terminal connection";
+         return false;
+        }
+      if(GetTickCount64()-started>=timeout_ms)
+        {
+         failure=StringFormat("terminal connection timeout after %u ms",timeout_ms);
+         return false;
+        }
+      Sleep(250);
+     }
+   return true;
   }
 
 
@@ -546,6 +568,12 @@ void OnStart()
    string failure="";
    CleanupPartialFiles();
    if(!DeleteIfPresent(EVENTS_FILE,failure) || !DeleteIfPresent(METADATA_FILE,failure))
+     {
+      PrintFormat("GSCALP_NEWS_EXPORT_FAILED reason=%s",failure);
+      CleanupPartialFiles();
+      return;
+     }
+   if(!WaitForConnectedTerminal(CONNECTION_TIMEOUT_MS,failure))
      {
       PrintFormat("GSCALP_NEWS_EXPORT_FAILED reason=%s",failure);
       CleanupPartialFiles();
