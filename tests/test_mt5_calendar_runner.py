@@ -47,6 +47,7 @@ def test_runner_refuses_running_terminal_and_requires_clean_compile():
     assert "0 errors, 0 warnings" in source
     assert "GSCALP_NewsExport.ex5" in source
     assert "GSCALP_NewsExport.log" in source
+    assert "$compileProcess.ExitCode -ne 0" not in source
 
 
 def test_runner_requires_complete_pair_before_copying_raw_bytes():

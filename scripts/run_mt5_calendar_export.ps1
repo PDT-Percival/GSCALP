@@ -149,9 +149,6 @@ try {
         -WindowStyle Hidden `
         -PassThru `
         -Wait
-    if ($compileProcess.ExitCode -ne 0) {
-        throw "MetaEditor returned exit code $($compileProcess.ExitCode)."
-    }
     if (-not (Test-Path -LiteralPath $compileLog -PathType Leaf)) {
         throw "MetaEditor did not produce the compile log: $compileLog"
     }
