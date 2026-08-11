@@ -705,6 +705,61 @@ class ParquetPullbackSource:
             )
         return batches
 
+    def _load_reference_spreads(
+        self,
+        candidate_dates: list[date],
+        windows: tuple[str, ...],
+    ) -> dict[tuple[str, date], float]:
+        intervals: list[dict[str, Any]] = []
+        for window in windows:
+            for local_date in candidate_dates:
+                session_start, _ = new_york_session_bounds(local_date, window)
+                intervals.append(
+                    {
+                        "window": window,
+                        "local_date": local_date,
+                        "start_utc": (
+                            session_start
+                            - pd.Timedelta(
+                                minutes=self.config.reference_spread_minutes
+                            )
+                        ).tz_localize(None),
+                        "end_utc": session_start.tz_localize(None),
+                    }
+                )
+        if not intervals:
+            return {}
+        years = {local_date.year for local_date in candidate_dates}
+        partition = f"year={next(iter(years))}" if len(years) == 1 else "year=*"
+        pattern = (
+            (self.market_root / "ticks" / partition / "ticks.parquet")
+            .resolve()
+            .as_posix()
+            .replace("'", "''")
+        )
+        connection = duckdb.connect()
+        try:
+            connection.register("intervals", pd.DataFrame(intervals))
+            rows = connection.execute(
+                f"""
+                SELECT i.window,
+                       i.local_date,
+                       median(t.Ask - t.Bid) AS reference_spread
+                FROM read_parquet('{pattern}', hive_partitioning=true) AS t
+                JOIN intervals AS i
+                  ON t.Timestamp >= i.start_utc
+                 AND t.Timestamp < i.end_utc
+                WHERE t.Ask >= t.Bid
+                GROUP BY i.window, i.local_date
+                """
+            ).fetchall()
+        finally:
+            connection.close()
+        return {
+            (str(window), pd.Timestamp(local_date).date()): float(spread)
+            for window, local_date, spread in rows
+        }
+
     def _iter_window_markets(
         self,
         window: str,
@@ -824,12 +879,122 @@ class ParquetPullbackSource:
                     }
                 )
 
-        for window, window_candidates in by_window.items():
+        def evaluate_market_session(
+            window: str,
+            window_candidates: list[PullbackCandidate],
+            local_date: date,
+            session_start: pd.Timestamp,
+            session_end: pd.Timestamp,
+            market: pd.DataFrame,
+            local_bars: Mapping[str, pd.DataFrame],
+            setup_decisions: Mapping[str, Any],
+        ) -> None:
             ceiling = self.development_spread_ceilings[window]
-            for local_date, market in self._iter_window_markets(
-                window,
-                candidate_dates,
-            ):
+            active_ticks = market.loc[
+                (market.index >= session_start)
+                & (market.index < session_end)
+            ]
+            if active_ticks.empty:
+                reject(
+                    window_candidates,
+                    local_date,
+                    session_start,
+                    PullbackReason.SPREAD_TOO_WIDE.value,
+                    {"market_data": "missing_session_ticks"},
+                )
+                return
+            for candidate in window_candidates:
+                setup_decision = setup_decisions[candidate.candidate_id]
+                eligible = active_ticks.loc[
+                    (active_ticks.index >= setup_decision.setup.entry_available_time)
+                    & (
+                        active_ticks.index
+                        <= session_start
+                        + pd.Timedelta(minutes=self.config.entry_cutoff_minute)
+                    )
+                ]
+                if eligible.empty:
+                    reject(
+                        [candidate],
+                        local_date,
+                        session_start,
+                        "entry_timeout",
+                    )
+                    continue
+                first_tick = eligible.iloc[0]
+                executable_entry = (
+                    float(first_tick["ask"])
+                    if setup_decision.setup.direction is TradeDirection.LONG
+                    else float(first_tick["bid"])
+                )
+                plan = size_trade(
+                    setup=setup_decision.setup,
+                    executable_entry=executable_entry,
+                    development_spread_ceiling=ceiling,
+                    starting_day_equity=10_000.0,
+                    free_margin=10_000.0,
+                    symbol=self._symbol,
+                    calculator=self._calculator,
+                    config=self.config,
+                    trade_id=f"{local_date.isoformat()}-{candidate.candidate_id}",
+                )
+                if plan.plan is None:
+                    reject(
+                        [candidate],
+                        local_date,
+                        session_start,
+                        plan.reason.value,
+                    )
+                    continue
+                abort_bars = (
+                    local_bars["M1"]
+                    if candidate.abort_timeframe == "M1"
+                    else local_bars["M5"]
+                )
+                simulations = {
+                    "base": simulate_trade(
+                        plan.plan,
+                        active_ticks,
+                        abort_bars,
+                        session_end,
+                        self._symbol.contract_size,
+                    ),
+                    "spread": simulate_trade(
+                        plan.plan,
+                        active_ticks,
+                        abort_bars,
+                        session_end,
+                        self._symbol.contract_size,
+                        CostStress(spread_multiplier=1.25),
+                    ),
+                    "cost": simulate_trade(
+                        plan.plan,
+                        active_ticks,
+                        abort_bars,
+                        session_end,
+                        self._symbol.contract_size,
+                        CostStress(additional_r_cost=0.05),
+                    ),
+                }
+                base = simulations["base"]
+                if base.trade is None:
+                    reject(
+                        [candidate],
+                        local_date,
+                        session_start,
+                        base.reason.value,
+                    )
+                    continue
+                for scenario, simulation in simulations.items():
+                    if simulation.trade is not None:
+                        scenario_trades[candidate.candidate_id][scenario].append(
+                            simulation.trade
+                        )
+
+        prepared_by_window: dict[str, dict[date, tuple[Any, ...]]] = {}
+        for window, window_candidates in by_window.items():
+            prepared: dict[date, tuple[Any, ...]] = {}
+            for local_date in candidate_dates:
                 session_start, session_end = new_york_session_bounds(
                     local_date,
                     window,
@@ -844,50 +1009,18 @@ class ParquetPullbackSource:
                         news_block,
                     )
                     continue
-                reference = market.loc[
-                    (market.index >= session_start - pd.Timedelta(minutes=30))
-                    & (market.index < session_start)
-                ]
-                active_ticks = market.loc[
-                    (market.index >= session_start)
-                    & (market.index < session_end)
-                ]
-                if reference.empty or active_ticks.empty:
-                    reject(
-                        window_candidates,
-                        local_date,
-                        session_start,
-                        PullbackReason.SPREAD_TOO_WIDE.value,
-                        {"market_data": "missing_reference_or_session_ticks"},
-                    )
-                    continue
-                reference_spread = float(
-                    (reference["ask"] - reference["bid"]).median()
-                )
                 local_bars = {
                     "M1": session_bar_context(
-                        bars["M1"],
-                        session_start,
-                        session_end,
-                        warmup_rows=20,
+                        bars["M1"], session_start, session_end, warmup_rows=20
                     ),
                     "M5": session_bar_context(
-                        bars["M5"],
-                        session_start,
-                        session_end,
-                        warmup_rows=40,
+                        bars["M5"], session_start, session_end, warmup_rows=40
                     ),
                     "M15": session_bar_context(
-                        bars["M15"],
-                        session_start,
-                        session_end,
-                        warmup_rows=30,
+                        bars["M15"], session_start, session_end, warmup_rows=30
                     ),
                     "H1": session_bar_context(
-                        bars["H1"],
-                        session_start,
-                        session_end,
-                        warmup_rows=30,
+                        bars["H1"], session_start, session_end, warmup_rows=30
                     ),
                 }
                 locked_bias = evaluate_locked_bias(
@@ -904,6 +1037,46 @@ class ParquetPullbackSource:
                         locked_bias.reason.value,
                     )
                     continue
+                prepared[local_date] = (
+                    session_start,
+                    session_end,
+                    local_bars,
+                    locked_bias,
+                )
+            if not prepared:
+                continue
+            prepared_by_window[window] = prepared
+
+        reference_spreads = (
+            self._load_reference_spreads(
+                candidate_dates,
+                tuple(prepared_by_window),
+            )
+            if prepared_by_window
+            else {}
+        )
+        armed_by_window: dict[str, dict[date, tuple[Any, ...]]] = {}
+        for window, prepared in prepared_by_window.items():
+            window_candidates = by_window[window]
+            armed_sessions: dict[date, tuple[Any, ...]] = {}
+            for local_date, (
+                session_start,
+                session_end,
+                local_bars,
+                locked_bias,
+            ) in prepared.items():
+                reference_spread = reference_spreads.get((window, local_date))
+                if reference_spread is None:
+                    reject(
+                        window_candidates,
+                        local_date,
+                        session_start,
+                        PullbackReason.SPREAD_TOO_WIDE.value,
+                        {"market_data": "missing_reference_ticks"},
+                    )
+                    continue
+                setup_decisions: dict[str, Any] = {}
+                armed_candidates: list[PullbackCandidate] = []
                 for candidate in window_candidates:
                     setup_decision = detect_pullback_setup(
                         local_bars["M1"],
@@ -923,93 +1096,41 @@ class ParquetPullbackSource:
                             setup_decision.reason.value,
                         )
                         continue
-                    eligible = active_ticks.loc[
-                        (active_ticks.index >= setup_decision.setup.entry_available_time)
-                        & (
-                            active_ticks.index
-                            <= session_start
-                            + pd.Timedelta(minutes=self.config.entry_cutoff_minute)
-                        )
-                    ]
-                    if eligible.empty:
-                        reject(
-                            [candidate],
-                            local_date,
-                            session_start,
-                            "entry_timeout",
-                        )
-                        continue
-                    first_tick = eligible.iloc[0]
-                    executable_entry = (
-                        float(first_tick["ask"])
-                        if setup_decision.setup.direction is TradeDirection.LONG
-                        else float(first_tick["bid"])
+                    armed_candidates.append(candidate)
+                    setup_decisions[candidate.candidate_id] = setup_decision
+                if armed_candidates:
+                    armed_sessions[local_date] = (
+                        session_start,
+                        session_end,
+                        local_bars,
+                        armed_candidates,
+                        setup_decisions,
                     )
-                    plan = size_trade(
-                        setup=setup_decision.setup,
-                        executable_entry=executable_entry,
-                        development_spread_ceiling=ceiling,
-                        starting_day_equity=10_000.0,
-                        free_margin=10_000.0,
-                        symbol=self._symbol,
-                        calculator=self._calculator,
-                        config=self.config,
-                        trade_id=(
-                            f"{local_date.isoformat()}-{candidate.candidate_id}"
-                        ),
-                    )
-                    if plan.plan is None:
-                        reject(
-                            [candidate],
-                            local_date,
-                            session_start,
-                            plan.reason.value,
-                        )
-                        continue
-                    abort_bars = (
-                        local_bars["M1"]
-                        if candidate.abort_timeframe == "M1"
-                        else local_bars["M5"]
-                    )
-                    simulations = {
-                        "base": simulate_trade(
-                            plan.plan,
-                            active_ticks,
-                            abort_bars,
-                            session_end,
-                            self._symbol.contract_size,
-                        ),
-                        "spread": simulate_trade(
-                            plan.plan,
-                            active_ticks,
-                            abort_bars,
-                            session_end,
-                            self._symbol.contract_size,
-                            CostStress(spread_multiplier=1.25),
-                        ),
-                        "cost": simulate_trade(
-                            plan.plan,
-                            active_ticks,
-                            abort_bars,
-                            session_end,
-                            self._symbol.contract_size,
-                            CostStress(additional_r_cost=0.05),
-                        ),
-                    }
-                    base = simulations["base"]
-                    if base.trade is None:
-                        reject(
-                            [candidate],
-                            local_date,
-                            session_start,
-                            base.reason.value,
-                        )
-                        continue
-                    for scenario, simulation in simulations.items():
-                        if simulation.trade is not None:
-                            scenario_trades[candidate.candidate_id][scenario].append(
-                                simulation.trade
-                            )
+            if armed_sessions:
+                armed_by_window[window] = armed_sessions
+
+        for window, armed_sessions in armed_by_window.items():
+            for local_date, market in self._iter_window_markets(
+                window,
+                list(armed_sessions),
+            ):
+                (
+                    session_start,
+                    session_end,
+                    local_bars,
+                    armed_candidates,
+                    setup_decisions,
+                ) = armed_sessions[local_date]
+                evaluate_market_session(
+                    window,
+                    armed_candidates,
+                    local_date,
+                    session_start,
+                    session_end,
+                    market,
+                    local_bars,
+                    setup_decisions,
+                )
 
         results: list[CandidateEvaluation] = []
         for candidate in selected:

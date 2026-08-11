@@ -398,6 +398,85 @@ def test_tick_batch_returns_session_keyed_frames(tmp_path):
     )
 
 
+def test_reference_spreads_are_aggregated_per_session(tmp_path):
+    market = canonical_market(tmp_path)
+    news = tmp_path / "news.csv"
+    news.write_text(
+        "event_start_utc,event_end_utc,currency,impact,event_name,source\n",
+        encoding="utf-8",
+    )
+    source = ParquetPullbackSource(
+        load_pullback_config("config/pullback-v1.1.json"), market, news_path=news
+    )
+    local_date = pd.Timestamp("2020-01-02").date()
+
+    spreads = source._load_reference_spreads(
+        [local_date],
+        ("09:30-10:30",),
+    )
+
+    assert spreads[("09:30-10:30", local_date)] == pytest.approx(0.10)
+
+
+def test_unarmed_setup_does_not_materialize_session_ticks(tmp_path, monkeypatch):
+    import gscalp.pullback_pipeline as pipeline
+    from gscalp.pullback_models import (
+        BiasDecision,
+        PullbackReason,
+        SetupDecision,
+        TradeDirection,
+    )
+
+    market = canonical_market(tmp_path)
+    news = tmp_path / "clear.csv"
+    news.write_text(
+        "event_start_utc,event_end_utc,currency,impact,event_name,source\n"
+        "2020-01-02T14:00:00Z,2020-01-02T16:00:00Z,ALL,none,"
+        "NO_HIGH_IMPACT_EVENTS,verified-source\n",
+        encoding="utf-8",
+    )
+    config = load_pullback_config("config/pullback-v1.1.json")
+    source = ParquetPullbackSource(config, market, news_path=news)
+    selected = config.candidates()[12]
+    source.development_spread_ceilings[selected.session_ny] = 0.30
+
+    def bullish_bias(_h1, _m15, session_start, _config):
+        return BiasDecision(
+            TradeDirection.LONG,
+            PullbackReason.SETUP_ARMED,
+            session_start,
+            101.0,
+            100.0,
+            99.0,
+            101.0,
+            100.0,
+            99.0,
+        )
+
+    monkeypatch.setattr(pipeline, "evaluate_locked_bias", bullish_bias)
+    monkeypatch.setattr(
+        pipeline,
+        "detect_pullback_setup",
+        lambda *_args, **_kwargs: SetupDecision(None, PullbackReason.NO_PULLBACK),
+    )
+    monkeypatch.setattr(
+        source,
+        "_load_tick_batch",
+        lambda *_args, **_kwargs: pytest.fail(
+            "raw session ticks must not load before a setup arms"
+        ),
+    )
+
+    result = source._evaluate(
+        "validation",
+        pd.Timestamp("2020-01-02").date(),
+        pd.Timestamp("2020-01-02").date(),
+        (selected.candidate_id,),
+    )
+
+    assert result.candidates[0].reason_counts == {"no_pullback": 1}
+
+
 def test_missing_news_blocks_candidate_before_any_signal_evaluation(tmp_path):
     market = canonical_market(tmp_path)
     config = load_pullback_config("config/pullback-v1.1.json")
