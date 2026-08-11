@@ -2,28 +2,44 @@
 
 - Branch: `feat/grid-v1-research`
 - Pull request: `https://github.com/PDT-Percival/GSCALP/pull/1`
-- Latest implementation commit: `5fb7f81`
-- Safety state: historical research only; no pullback candidate is eligible for
-  shadow or demo execution.
-- Verification observed after the latest implementation changes: `308 passed`
-  and the static pullback no-order API scan was clean.
+- MT5 calendar/export implementation: through commit `c2e84af`
+- Safety state: historical/read-only; no strategy is eligible for shadow or
+  demo execution.
 
-## Built research modules
+## Evidence now available
 
-Pullback v1.1 now has a frozen configuration contract, completed-bar bias and
-setup detection, risk-capped sizing, tick execution/exit simulation, partition
-gates, canonical Parquet ingestion, reason-coded artifacts, and a CLI research
-command. Performance work aggregates reference spreads, loads raw ticks only
-for armed sessions, batches tick joins by year, detects each trigger-timeframe
-setup once per session, and vectorizes the first-exit scan.
+The approved FBS MT5 terminal exported a complete source-backed USD/XAU
+economic calendar in a guarded, read-only run. Import and independent
+reconciliation confirmed:
 
-## Current research decision
+- 158 successful monthly queries (79 USD, 79 XAU), zero query errors;
+- 24,596 unique raw event rows;
+- 8,098 canonical news rows (3,419 high impact, 4,679 explicit clear);
+- complete coverage for 4,056 Grid v1.0 sessions and 6,084 Pullback v1.1
+  sessions;
+- exact generated/independent coverage agreement; and
+- canonical news SHA-256
+  `72c310660954965f13f3394f30273e6a5349647bbce3b6865dba6109be20e26d`.
 
-Grid v1.0 and directional pullback v1.1 are both rejected at development. The
-pullback no-news run completed on 11 August 2026 with 36 candidates, 1,896 base
-trade rows, 41,772 rejection rows, and zero gate passes. Validation and test
-were not accessed. See `docs/research/pullback-v1.1-result.md`.
+The approved terminal is
+`C:\Program Files\FBS MetaTrader 5\terminal64.exe`; the manifest records
+terminal build 6090, `FBS-Demo`, trade mode 0, margin mode 2, and
+`application_can_trade=false`.
 
-The source-backed news requirement remains incomplete. The conservative
-header-only run blocks every candidate session; the user-approved bypass is
-not promotion evidence.
+## Research decision
+
+Grid v1.0 and Pullback v1.1 were rerun from their unchanged frozen configs
+using the source-backed calendar. Both are `development_rejected`:
+
+- Grid: both candidate windows failed; the better window produced one basket
+  with `-0.030645R` base and `-0.103207R` stressed expectancy.
+- Pullback: 0 of 36 candidates passed. The top score was based on only four
+  base trades and one spread-stress trade, so it failed robustness gates.
+
+Validation and test stayed unopened for both strategies. The ten-session
+shadow gate and 0.25% demo stage were correctly skipped because promotion
+eligibility was false. No GSCALP order API was called and no order was
+submitted by this workflow.
+
+Definitive results are in `docs/research/grid-v1.0-result.md` and
+`docs/research/pullback-v1.1-result.md`.
