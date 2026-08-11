@@ -58,6 +58,7 @@ def test_runner_requires_complete_pair_before_copying_raw_bytes():
     assert "export_status,complete" in source
     assert "Copy-Item -LiteralPath" in source
     assert "Get-FileHash" in source
+    assert "$terminalProcess.ExitCode -ne 0" not in source
 
 
 def test_operations_document_exact_nontrading_workflow():

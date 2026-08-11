@@ -189,10 +189,6 @@ ShutdownTerminal=1
     if (-not $terminalProcess.HasExited) {
         throw "MT5 calendar export timed out after $TimeoutSeconds seconds; the terminal was left running for inspection."
     }
-    if ($terminalProcess.ExitCode -ne 0) {
-        throw "The FBS terminal returned exit code $($terminalProcess.ExitCode)."
-    }
-
     $terminalFiles = Join-Path $dataFolder 'MQL5\Files\GSCALP'
     $rawEvents = Join-Path $terminalFiles 'mt5_calendar_events.csv'
     $rawMetadata = Join-Path $terminalFiles 'mt5_calendar_metadata.csv'
