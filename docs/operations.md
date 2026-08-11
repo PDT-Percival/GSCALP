@@ -112,6 +112,19 @@ Demo mode requires all of the following:
 Until then, `data/news_blackouts.csv` intentionally contains no current-date
 confirmation and blocks execution. Never fabricate a no-news row to bypass it.
 
+## Current grid and pullback research decision
+
+Grid v1.0 and directional pullback v1.1 are both rejected at development.
+Pullback v1.1 evaluated 36 frozen candidates over 1,213 development dates under
+the user-approved no-news sensitivity condition. Zero candidates passed; the
+best returned `-0.016078R` base expectancy, `0.942991` profit factor, and 73
+trades. Validation and test remained unopened.
+
+Do not begin the ten-session shadow gate or demo execution for v1.1. The broad
+news-bypass interval is not source-backed and is non-promotable. The exact
+evidence, hashes, reconciliation, and limitations are recorded in
+`docs/research/pullback-v1.1-result.md`.
+
 Risk in demo is 0.25% of starting-day equity per trade, at most two entries, and
 at most 0.50% total session risk/loss. Volume is floored to the broker step from
 `order_calc_profit`; any rounding that exceeds the cash cap is rejected. Each
