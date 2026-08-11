@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
@@ -19,6 +20,7 @@ class SymbolSpec:
     volume_step: float
     stops_level: int
     filling_mode: int
+    volume_max: float = math.inf
 
 
 @dataclass(frozen=True, slots=True)
@@ -82,6 +84,7 @@ class MT5ReadGateway:
                 volume_step=float(raw_spec.volume_step),
                 stops_level=int(raw_spec.trade_stops_level),
                 filling_mode=int(raw_spec.filling_mode),
+                volume_max=float(getattr(raw_spec, "volume_max", math.inf)),
             )
             self._connected = True
             return TerminalSnapshot(
