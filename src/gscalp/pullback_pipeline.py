@@ -765,12 +765,10 @@ class ParquetPullbackSource:
         window: str,
         candidate_dates: list[date],
     ):
-        months: dict[tuple[int, int], list[date]] = {}
+        years: dict[int, list[date]] = {}
         for local_date in candidate_dates:
-            months.setdefault((local_date.year, local_date.month), []).append(
-                local_date
-            )
-        for dates in months.values():
+            years.setdefault(local_date.year, []).append(local_date)
+        for dates in years.values():
             batch = self._load_tick_batch(dates, (window,))
             for local_date in dates:
                 yield local_date, batch[(window, local_date)]

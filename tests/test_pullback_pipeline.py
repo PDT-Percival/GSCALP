@@ -398,6 +398,41 @@ def test_tick_batch_returns_session_keyed_frames(tmp_path):
     )
 
 
+def test_window_market_batches_scan_each_year_once(tmp_path, monkeypatch):
+    market = canonical_market(tmp_path)
+    news = tmp_path / "news.csv"
+    news.write_text(
+        "event_start_utc,event_end_utc,currency,impact,event_name,source\n",
+        encoding="utf-8",
+    )
+    source = ParquetPullbackSource(
+        load_pullback_config("config/pullback-v1.1.json"), market, news_path=news
+    )
+    candidate_dates = [
+        pd.Timestamp("2020-01-02").date(),
+        pd.Timestamp("2020-02-03").date(),
+        pd.Timestamp("2021-01-04").date(),
+    ]
+    calls = []
+
+    def load_batch(dates, windows):
+        calls.append((tuple(dates), windows))
+        empty = pd.DataFrame(
+            columns=["bid", "ask"],
+            index=pd.DatetimeIndex([], name="Timestamp", tz="UTC"),
+        )
+        return {(windows[0], local_date): empty for local_date in dates}
+
+    monkeypatch.setattr(source, "_load_tick_batch", load_batch)
+
+    list(source._iter_window_markets("09:30-10:30", candidate_dates))
+
+    assert calls == [
+        ((candidate_dates[0], candidate_dates[1]), ("09:30-10:30",)),
+        ((candidate_dates[2],), ("09:30-10:30",)),
+    ]
+
+
 def test_reference_spreads_are_aggregated_per_session(tmp_path):
     market = canonical_market(tmp_path)
     news = tmp_path / "news.csv"
